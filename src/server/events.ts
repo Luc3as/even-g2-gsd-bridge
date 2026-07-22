@@ -79,7 +79,17 @@ const recentEchoes = new Map<string, Array<{ text: string; at: number }>>();
 const ECHO_TTL_MS = 60_000;
 
 function normEcho(t: string): string {
-  return t.trim().replace(/\s+/g, " ");
+  // gsd's TUI rewrites the typed line before flushing it to jsonl: it strips a
+  // leading slash, sentence-cases words, and adds trailing punctuation. Match
+  // loosely so the optimistic echo still cancels its own replay: lowercase,
+  // drop a leading slash, strip trailing punctuation, collapse whitespace.
+  return t
+    .trim()
+    .toLowerCase()
+    .replace(/^\/+/, "")
+    .replace(/[.!?…]+$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function recordEcho(sessionId: string, text: string): void {

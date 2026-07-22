@@ -16,6 +16,14 @@ test("consumeEcho normalizes whitespace", () => {
   assert.equal(consumeEcho(s, "hello world"), true);
 });
 
+test("consumeEcho matches after gsd rewrites slash/case/punctuation", () => {
+  const s = "sess-echo-rewrite";
+  // Glasses typed "/show me the latest git commit"; gsd flushed
+  // "Show me the latest Git commit." to jsonl. Still one line, not two.
+  recordEcho(s, "/show me the latest git commit");
+  assert.equal(consumeEcho(s, "Show me the latest Git commit."), true);
+});
+
 test("consumeEcho returns false when nothing was echoed", () => {
   assert.equal(consumeEcho("sess-echo-unknown", "anything"), false);
 });
