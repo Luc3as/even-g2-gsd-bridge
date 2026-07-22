@@ -1,6 +1,6 @@
 import { statSync, openSync, readSync, closeSync } from "node:fs";
 import type { Config } from "../config.js";
-import { emit, sessionHasClients, consumeEcho } from "../server/events.js";
+import { emit, emitText, sessionHasClients, consumeEcho } from "../server/events.js";
 import { parseLine, blocksToText, deriveStatusFromEntries } from "./jsonl.js";
 import { listProjects, type Project } from "./sessions.js";
 import { capturePane } from "./tmux.js";
@@ -50,7 +50,9 @@ function emitEntry(sessionId: string, line: string): void {
   if (!text && tools.length === 0) return;
   if (role === "assistant") {
     for (const tool of tools) emit(sessionId, { type: "tool_call", text: `> ${tool}`, ts: e.timestamp });
-    if (text) emit(sessionId, { type: "agent_message", text, ts: e.timestamp });
+    // The answer must render as a firmware-known text_delta triad, not an
+    // `agent_message` (a type the glasses drop). See emitText.
+    if (text) emitText(sessionId, text, e.timestamp);
   } else if (role === "user") {
     // A glasses-sent prompt was already echoed optimistically by provider; skip
     // the jsonl replay of that same line so the wearer doesn't see it twice.
@@ -149,7 +151,7 @@ function detectQuestion(p: Project): void {
       if (q) {
         if (!had || had.signature !== q.signature) {
           setPending(p.sessionId, q);
-          emit(p.sessionId, { type: "agent_message", text: renderMenu(q) });
+          emitText(p.sessionId, renderMenu(q));
           log.info("watch", `question detected ${p.sessionId} (${q.options.length} options)`);
         }
       } else if (had) {

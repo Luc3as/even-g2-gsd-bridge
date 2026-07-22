@@ -7,7 +7,7 @@ import { parseTranscript, deriveStatus, type Status } from "../gsd/jsonl.js";
 import { toGlassesHistory } from "./format.js";
 import * as tmux from "../gsd/tmux.js";
 import { getPending, clearPending, matchAnswer, matchMulti, renderMenu } from "../gsd/questions.js";
-import { emit, recordEcho } from "../server/events.js";
+import { emit, emitText, recordEcho } from "../server/events.js";
 import { log } from "../log.js";
 
 const execFileAsync = promisify(execFile);
@@ -126,7 +126,7 @@ export function createGsdProvider(cfg: Config) {
     if (q.multi) {
       const picks = matchMulti(q.options, text);
       if (picks.length === 0) {
-        emit(p.sessionId, { type: "agent_message", text: `Didn't catch that.\n${renderMenu(q)}` });
+        emitText(p.sessionId, `Didn't catch that.\n${renderMenu(q)}`);
         return true;
       }
       clearPending(p.sessionId);

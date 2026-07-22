@@ -29,8 +29,10 @@ function cfgFor(store: string): Config {
 // Regression: a newline-terminated chunk used to drift the byte offset +1 per
 // read (the trailing "" from split counted as a byte), so the NEXT line was read
 // one byte short, failed to parse, and its entry was silently dropped. For a
-// plain answer turn that dropped line was the agent_message — the answer never
-// reached the ring, and the glasses stayed stuck on "thinking".
+// plain answer turn that dropped line was the answer text — it never reached
+// the ring, and the glasses stayed stuck on "thinking". The answer now ships as
+// a firmware-known text_delta (bracketed by text_start/text_end), not an
+// `agent_message` the glasses silently drop.
 test("tick emits an answer written a tick after the prompt (no offset drift)", () => {
   const store = mkdtempSync(join(tmpdir(), "watch-drift-"));
   try {
@@ -58,9 +60,16 @@ test("tick emits an answer written a tick after the prompt (no offset drift)", (
     const msgs = getMessages("--slug--", 0);
     const types = msgs.map((m) => m.type);
     assert.ok(types.includes("user_prompt"), `expected user_prompt, got ${types.join(",")}`);
-    assert.ok(types.includes("agent_message"), `answer dropped by offset drift, got ${types.join(",")}`);
-    const answer = msgs.find((m) => m.type === "agent_message");
+    // Answer renders via the text_delta triad, not an agent_message.
+    assert.ok(types.includes("text_delta"), `answer dropped by offset drift, got ${types.join(",")}`);
+    assert.ok(!types.includes("agent_message"), `answer must not use the unrenderable agent_message type`);
+    const answer = msgs.find((m) => m.type === "text_delta");
     assert.equal((answer as { text?: string }).text, "Letters bit = the trailer line.");
+    // text_delta must be bracketed by a text_start/text_end status pair.
+    const startIdx = msgs.findIndex((m) => m.type === "status" && (m as { state?: string }).state === "text_start");
+    const deltaIdx = msgs.findIndex((m) => m.type === "text_delta");
+    const endIdx = msgs.findIndex((m) => m.type === "status" && (m as { state?: string }).state === "text_end");
+    assert.ok(startIdx >= 0 && startIdx < deltaIdx && deltaIdx < endIdx, "text_delta not bracketed by text_start/text_end");
   } finally {
     rmSync(store, { recursive: true, force: true });
   }

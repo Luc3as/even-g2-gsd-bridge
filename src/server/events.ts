@@ -68,6 +68,22 @@ export function emit(sessionId: string, msg: EvenMessage): void {
 }
 
 /**
+ * Emit assistant/system text the way the Even glasses firmware renders it.
+ * The stock @evenrealities/even-terminal has NO `agent_message` type: assistant
+ * text is rendered as a `text_delta` stream bracketed by a `status:text_start`
+ * / `status:text_end` pair (see the reference bridge's claude/session.js). The
+ * glasses silently drop any unknown frame type, so the bridge's old
+ * `agent_message` emits never rendered — the answer reached the ring but wore a
+ * type the firmware ignores. The reference streams many deltas live; the bridge
+ * tails completed jsonl, so the whole line ships in one delta.
+ */
+export function emitText(sessionId: string, text: string, ts?: string): void {
+  emit(sessionId, { type: "status", state: "text_start" });
+  emit(sessionId, { type: "text_delta", text, ...(ts ? { ts } : {}) });
+  emit(sessionId, { type: "status", state: "text_end" });
+}
+
+/**
  * Optimistic-echo dedupe. provider echoes a glasses-sent prompt instantly (so
  * the wearer sees their own words with no lag); seconds later the jsonl tailer
  * reads the same user line gsd wrote and would emit it again. provider records
