@@ -1,6 +1,6 @@
 import { statSync, openSync, readSync, closeSync } from "node:fs";
 import type { Config } from "../config.js";
-import { emit, sessionHasClients } from "../server/events.js";
+import { emit, sessionHasClients, consumeEcho } from "../server/events.js";
 import { parseLine, blocksToText, deriveStatusFromEntry } from "./jsonl.js";
 import { listProjects, type Project } from "./sessions.js";
 import { capturePane } from "./tmux.js";
@@ -52,6 +52,9 @@ function emitEntry(sessionId: string, line: string): void {
     for (const tool of tools) emit(sessionId, { type: "tool_call", text: `> ${tool}`, ts: e.timestamp });
     if (text) emit(sessionId, { type: "agent_message", text, ts: e.timestamp });
   } else if (role === "user") {
+    // A glasses-sent prompt was already echoed optimistically by provider; skip
+    // the jsonl replay of that same line so the wearer doesn't see it twice.
+    if (consumeEcho(sessionId, text)) return;
     emit(sessionId, { type: "user_prompt", text, ts: e.timestamp });
   } else if (role === "toolResult") {
     if (text.trim()) emit(sessionId, { type: "tool_result", text: text.slice(0, 200), ts: e.timestamp });

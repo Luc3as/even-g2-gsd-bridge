@@ -7,7 +7,7 @@ import { parseTranscript, deriveStatus, type Status } from "../gsd/jsonl.js";
 import { toGlassesHistory } from "./format.js";
 import * as tmux from "../gsd/tmux.js";
 import { getPending, clearPending, matchAnswer, matchMulti, renderMenu } from "../gsd/questions.js";
-import { emit } from "../server/events.js";
+import { emit, recordEcho } from "../server/events.js";
 import { log } from "../log.js";
 
 const execFileAsync = promisify(execFile);
@@ -189,7 +189,9 @@ export function createGsdProvider(cfg: Config) {
       await new Promise((r) => setTimeout(r, 1500));
     }
     await tmux.sendPrompt(p.tmuxName, text);
-    // Optimistic echo so the glasses see their own input immediately.
+    // Optimistic echo so the glasses see their own input immediately. Record it
+    // so the jsonl tailer skips the duplicate replay of the same user line.
+    recordEcho(p.sessionId, text);
     emit(p.sessionId, { type: "user_prompt", text });
     log.info("provider", `prompt → ${p.tmuxName} (${text.length} chars)`);
     return { sessionId: p.sessionId, provider: "claude" as const };

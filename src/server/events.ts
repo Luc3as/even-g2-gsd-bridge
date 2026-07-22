@@ -67,6 +67,48 @@ export function emit(sessionId: string, msg: EvenMessage): void {
   broadcast(sessionId, msg, id);
 }
 
+/**
+ * Optimistic-echo dedupe. provider echoes a glasses-sent prompt instantly (so
+ * the wearer sees their own words with no lag); seconds later the jsonl tailer
+ * reads the same user line gsd wrote and would emit it again. provider records
+ * each echo here; the tailer calls consumeEcho to drop the one matching replay.
+ * Matched once, then removed, so a genuine later repeat of the same text still
+ * shows. Records expire after ECHO_TTL_MS to bound the map.
+ */
+const recentEchoes = new Map<string, Array<{ text: string; at: number }>>();
+const ECHO_TTL_MS = 60_000;
+
+function normEcho(t: string): string {
+  return t.trim().replace(/\s+/g, " ");
+}
+
+export function recordEcho(sessionId: string, text: string): void {
+  const arr = recentEchoes.get(sessionId) ?? [];
+  arr.push({ text: normEcho(text), at: Date.now() });
+  recentEchoes.set(sessionId, arr);
+}
+
+/** True (and consumes the record) if this user line matches a fresh echo. */
+export function consumeEcho(sessionId: string, text: string): boolean {
+  const arr = recentEchoes.get(sessionId);
+  if (!arr) return false;
+  const now = Date.now();
+  const t = normEcho(text);
+  let hit = false;
+  const kept: Array<{ text: string; at: number }> = [];
+  for (const e of arr) {
+    if (now - e.at > ECHO_TTL_MS) continue; // prune stale
+    if (!hit && e.text === t) {
+      hit = true; // consume exactly one
+      continue;
+    }
+    kept.push(e);
+  }
+  if (kept.length) recentEchoes.set(sessionId, kept);
+  else recentEchoes.delete(sessionId);
+  return hit;
+}
+
 export function sessionHasClients(sessionId: string): boolean {
   const s = sessions.get(sessionId);
   return !!s && s.clients.size > 0;
