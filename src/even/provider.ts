@@ -24,7 +24,7 @@ export interface SessionInfo {
   title: string;
   timestamp: string;
   cwd: string;
-  provider: "gsd";
+  provider: "claude";
   status: Status | null;
 }
 
@@ -61,7 +61,7 @@ export function createGsdProvider(cfg: Config) {
       title: `[${p.name}]${live.has(p.tmuxName) ? " ●" : " ○"} ${p.title}`.slice(0, 64),
       timestamp: new Date(p.mtimeMs).toISOString(),
       cwd: p.cwd,
-      provider: "gsd" as const,
+      provider: "claude" as const,
       status: null, // filled lazily by the route via getSessionStatus
     }));
   }
@@ -72,10 +72,10 @@ export function createGsdProvider(cfg: Config) {
   }
 
   /** Synchronous guard used by the write routes (404 when session unknown). */
-  function getStatus(sessionId: string): { state: Status; provider: "gsd" } | null {
+  function getStatus(sessionId: string): { state: Status; provider: "claude" } | null {
     const p = resolve(sessionId);
     if (!p) return null;
-    return { state: statusFor(p), provider: "gsd" };
+    return { state: statusFor(p), provider: "claude" };
   }
 
   async function getInfo() {
@@ -97,7 +97,7 @@ export function createGsdProvider(cfg: Config) {
         /* ignore */
       }
     }
-    return { account: {}, model, version, provider: "gsd" as const };
+    return { account: {}, model, version, provider: "claude" as const };
   }
 
   async function getHistory(sessionId: string, limit: number) {
@@ -130,7 +130,7 @@ export function createGsdProvider(cfg: Config) {
     // Optimistic echo so the glasses see their own input immediately.
     emit(p.sessionId, { type: "user_prompt", text });
     log.info("provider", `prompt → ${p.tmuxName} (${text.length} chars)`);
-    return { sessionId: p.sessionId, provider: "gsd" as const };
+    return { sessionId: p.sessionId, provider: "claude" as const };
   }
 
   function respondPermission(sessionId: string, decision: string): void {
