@@ -56,9 +56,13 @@ function emitEntry(sessionId: string, line: string): void {
     // the jsonl replay of that same line so the wearer doesn't see it twice.
     if (consumeEcho(sessionId, text)) return;
     emit(sessionId, { type: "user_prompt", text, ts: e.timestamp });
-  } else if (role === "toolResult") {
-    if (text.trim()) emit(sessionId, { type: "tool_result", text: text.slice(0, 200), ts: e.timestamp });
   }
+  // toolResult is intentionally NOT emitted. gsd-native logs assistant content as
+  // [toolCall, text] and flushes the toolResult on a SEPARATE line AFTER it, so a
+  // tool_result frame always trails its own answer. On the glasses (latest frame
+  // wins) that raw command dump buries the agent_message answer the wearer needs.
+  // The tool_call summary ("> Bash: …") already gives the progress signal, so the
+  // result dump is pure noise on 576x288 — drop it and let the answer land last.
 }
 
 /**
