@@ -2,7 +2,9 @@ import { statSync, openSync, readSync, closeSync } from "node:fs";
 import type { Config } from "../config.js";
 import { emit, sessionHasClients } from "../server/events.js";
 import { parseLine, blocksToText, deriveStatusFromEntry } from "./jsonl.js";
-import { listProjects } from "./sessions.js";
+import { listProjects, type Project } from "./sessions.js";
+import { capturePane } from "./tmux.js";
+import { parsePicker, getPending, setPending, clearPending, renderMenu } from "./questions.js";
 import { log } from "../log.js";
 
 /**
@@ -115,7 +117,34 @@ export function tick(cfg: Config, now: number): void {
       t.status = "idle";
       emit(p.sessionId, { type: "status", state: "idle" });
     }
+
+    // ANSWER-mode: a gsd picker leaves no jsonl trace, so scrape the live pane.
+    detectQuestion(p);
   }
+}
+
+/**
+ * Fire-and-forget pane scrape for an open single-select picker. On a newly-seen
+ * question, emit the numbered menu as an agent_message (stock glasses render it
+ * with zero protocol changes) and store it so provider.prompt routes the next
+ * utterance to a digit selection. Idempotent via the question signature.
+ */
+function detectQuestion(p: Project): void {
+  capturePane(p.tmuxName, 40)
+    .then((pane) => {
+      const q = parsePicker(pane);
+      const had = getPending(p.sessionId);
+      if (q) {
+        if (!had || had.signature !== q.signature) {
+          setPending(p.sessionId, q);
+          emit(p.sessionId, { type: "agent_message", text: renderMenu(q) });
+          log.info("watch", `question detected ${p.sessionId} (${q.options.length} options)`);
+        }
+      } else if (had) {
+        clearPending(p.sessionId);
+      }
+    })
+    .catch((err) => log.error("watch", `question detect failed ${p.sessionId}`, err));
 }
 
 function statSizeSafe(path: string): number {

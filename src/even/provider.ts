@@ -6,6 +6,7 @@ import { listProjects, listAttachable, findProject, type Project } from "../gsd/
 import { parseTranscript, deriveStatus, type Status } from "../gsd/jsonl.js";
 import { toGlassesHistory } from "./format.js";
 import * as tmux from "../gsd/tmux.js";
+import { getPending, clearPending, matchAnswer, matchMulti, renderMenu } from "../gsd/questions.js";
 import { emit } from "../server/events.js";
 import { log } from "../log.js";
 
@@ -109,6 +110,60 @@ export function createGsdProvider(cfg: Config) {
     return toGlassesHistory(turns, limit);
   }
 
+  /**
+   * Answer an open picker. Returns true if the utterance was consumed as a
+   * selection (matched or not); false only when no picker is pending.
+   *   single-select — map to a digit, type it (jumps + auto-advances to the
+   *     review screen), beat, Enter to submit.
+   *   multi-select — digits are inert; walk down to each target (Down×k) +
+   *     Space to toggle, then Enter (review) + Enter (submit).
+   * On no match, re-show the menu and keep the question pending.
+   */
+  async function trySelect(p: Project, text: string): Promise<boolean> {
+    const q = getPending(p.sessionId);
+    if (!q) return false;
+
+    if (q.multi) {
+      const picks = matchMulti(q.options, text);
+      if (picks.length === 0) {
+        emit(p.sessionId, { type: "agent_message", text: `Didn't catch that.\n${renderMenu(q)}` });
+        return true;
+      }
+      clearPending(p.sessionId);
+      // Cursor starts on the first option; walk down to each pick in ascending
+      // order (Down× the gap), toggle with Space, then submit through review.
+      const keys: string[] = [];
+      let cursor = 0;
+      for (const idx of picks) {
+        for (let k = cursor; k < idx - 1; k++) keys.push("Down");
+        keys.push("Space");
+        cursor = idx - 1;
+      }
+      await tmux.sendKeys(p.tmuxName, keys);
+      await new Promise((r) => setTimeout(r, 200));
+      await tmux.sendKeys(p.tmuxName, ["Enter"]);
+      await new Promise((r) => setTimeout(r, 200));
+      await tmux.sendKeys(p.tmuxName, ["Enter"]);
+      const picked = picks.map((i) => q.options[i - 1]).join(", ");
+      emit(p.sessionId, { type: "user_prompt", text: `#${picks.join(",")} ${picked}` });
+      log.info("provider", `question answer → ${p.tmuxName} (multi #${picks.join(",")})`);
+      return true;
+    }
+
+    const idx = matchAnswer(q.options, text);
+    if (idx == null) {
+      emit(p.sessionId, { type: "agent_message", text: `Didn't catch that.\n${renderMenu(q)}` });
+      return true;
+    }
+    clearPending(p.sessionId);
+    await tmux.sendKeys(p.tmuxName, [String(idx)]);
+    await new Promise((r) => setTimeout(r, 200));
+    await tmux.sendKeys(p.tmuxName, ["Enter"]);
+    emit(p.sessionId, { type: "user_prompt", text: `#${idx} ${q.options[idx - 1]}` });
+    log.info("provider", `question answer → ${p.tmuxName} (#${idx})`);
+    return true;
+  }
+
   async function prompt(sessionId: string | undefined, text: string, cwd?: string) {
     // Resolve target project: by sessionId, else by cwd match (fresh prompt).
     let p = sessionId ? resolve(sessionId) : null;
@@ -116,6 +171,11 @@ export function createGsdProvider(cfg: Config) {
       p = listProjects(cfg.sessionsDirs, cfg.projectRoots).find((x) => x.cwd === cwd) ?? null;
     }
     if (!p) throw notFound(`Unknown session/project: ${sessionId ?? cwd ?? "(none)"}`);
+
+    // If a picker is open, this utterance is a selection, not a new prompt.
+    if (await trySelect(p, text)) {
+      return { sessionId: p.sessionId, provider: "claude" as const };
+    }
 
     const isLive = await tmux.hasSession(p.tmuxName);
     if (!isLive) {
@@ -146,7 +206,13 @@ export function createGsdProvider(cfg: Config) {
   function respondQuestion(sessionId: string, answer: string): void {
     const p = resolve(sessionId);
     if (!p) return;
-    tmux.sendPrompt(p.tmuxName, answer).catch((err) => log.error("provider", "question send failed", err));
+    // Map to a digit selection when a picker is open; else fall back to typing
+    // the answer as a line (e.g. a free-text prompt the client mislabeled).
+    if (getPending(sessionId)) {
+      trySelect(p, answer).catch((err) => log.error("provider", "question select failed", err));
+    } else {
+      tmux.sendPrompt(p.tmuxName, answer).catch((err) => log.error("provider", "question send failed", err));
+    }
     log.info("provider", `question answer → ${p.tmuxName}`);
   }
 
