@@ -49,6 +49,10 @@ export async function spawnSession(name: string, cwd: string, command: string): 
  */
 export async function sendPrompt(name: string, text: string): Promise<void> {
   await tmux(["send-keys", "-t", name, "-l", text]);
+  // Ink TUIs (gsd) need the literal text to commit to input state before the
+  // newline, or the Enter lands in the same render frame and is dropped —
+  // typed line sits unsubmitted. A short beat makes submit reliable.
+  await new Promise((r) => setTimeout(r, 200));
   await tmux(["send-keys", "-t", name, "Enter"]);
 }
 
