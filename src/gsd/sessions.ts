@@ -118,7 +118,7 @@ export function listProjects(sessionsDir: string, projectRoots: string[]): Proje
     if (!cwd) continue;
     // Skip worktree/internal dirs and anything outside the allowed roots.
     if (!projectRoots.some((root) => cwd === root || cwd.startsWith(root + "/"))) continue;
-    if (cwd.includes("/.gsd/worktrees/")) continue;
+    if (cwd.includes("/.gsd/worktrees/") || cwd.includes("/.gsd-worktrees/")) continue;
     projects.push({
       sessionId: slug,
       cwd,
@@ -154,8 +154,10 @@ export function listColdProjects(sessionsDir: string, projectRoots: string[]): P
       if (name.startsWith(".")) continue; // hidden dirs are not projects
       const cwd = join(root, name);
       if (sessionedCwds.has(cwd)) continue; // already listed as a live/known session
+      let st;
       try {
-        if (!statSync(cwd).isDirectory()) continue;
+        st = statSync(cwd);
+        if (!st.isDirectory()) continue;
       } catch {
         continue;
       }
@@ -165,12 +167,14 @@ export function listColdProjects(sessionsDir: string, projectRoots: string[]): P
         name,
         tmuxName: tmuxNameFor(cwd),
         newestJsonl: null,
-        mtimeMs: 0,
+        // Dir mtime so recently-touched projects surface first (Even App
+        // hard-caps the visible list at 10 entries — order is everything).
+        mtimeMs: st.mtimeMs,
         title: name,
       });
     }
   }
-  cold.sort((a, b) => a.name.localeCompare(b.name));
+  cold.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return cold;
 }
 
