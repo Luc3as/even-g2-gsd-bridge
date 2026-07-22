@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import type { GsdProvider } from "../even/provider.js";
 import { addClient, getMessages } from "./events.js";
-import { log } from "../log.js";
+import { log, redactToken } from "../log.js";
 
 /**
  * HTTP surface, wire-compatible with @evenrealities/even-terminal@0.8.1 so the
@@ -27,7 +27,7 @@ export function createRoutes(provider: GsdProvider): Router {
     );
     log.debug(
       "sse",
-      `connect raw ${req.ip} ua="${req.headers["user-agent"] ?? "-"}" query=${JSON.stringify(req.query)}`,
+      `connect raw ${req.ip} ua="${req.headers["user-agent"] ?? "-"}" query=${redactToken(JSON.stringify(req.query))}`,
     );
     const dispose = addClient(sessionId, res, req.query.needReplay === "true", lastEventId);
     req.on("close", dispose);

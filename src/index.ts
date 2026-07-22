@@ -6,7 +6,7 @@ import { createGsdProvider } from "./even/provider.js";
 import { createRoutes } from "./server/routes.js";
 import { startWatcher } from "./gsd/watch.js";
 import { totalClients } from "./server/events.js";
-import { log, setStateDir, getLastError } from "./log.js";
+import { log, setStateDir, getLastError, redactToken } from "./log.js";
 
 const cfg = loadConfig();
 setStateDir(cfg.stateDir);
@@ -24,7 +24,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   const t0 = process.hrtime.bigint();
   res.on("finish", () => {
     const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-    log.info("http", `${req.ip} ${res.statusCode} ${req.method} ${req.originalUrl} ${ms.toFixed(0)}ms`);
+    log.info("http", `${req.ip} ${res.statusCode} ${req.method} ${redactToken(req.originalUrl)} ${ms.toFixed(0)}ms`);
   });
   next();
 });

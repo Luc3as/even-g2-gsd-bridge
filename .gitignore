@@ -3,3 +3,8 @@ dist/
 .state/
 .env
 *.log
+
+# Private dev internals — never publish (home-dir paths, memories, DB, notifications)
+.gsd/
+.mcp.json
+.bg-shell/

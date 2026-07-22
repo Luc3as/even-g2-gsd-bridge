@@ -11,6 +11,19 @@ type Level = "debug" | "info" | "warn" | "error";
 /** Verbose per-frame SSE tracing, gated so it stays off in normal operation. */
 const DEBUG = process.env.DEBUG === "1";
 
+/**
+ * Strip a bearer token from a string before it reaches a log sink. The glasses
+ * auth via `?token=<BRIDGE_TOKEN>`, so both the request URL and the SSE query
+ * object carry the live credential; without this it lands in stdout → the
+ * systemd journal. Covers both `token=…` (URL/originalUrl) and `"token":"…"`
+ * (a JSON.stringify'd query object).
+ */
+export function redactToken(s: string): string {
+  return s
+    .replace(/([?&]token=)[^&\s]*/gi, "$1<redacted>")
+    .replace(/("token"\s*:\s*")[^"]*/gi, "$1<redacted>");
+}
+
 let stateDir = ".state";
 export function setStateDir(dir: string): void {
   stateDir = dir;

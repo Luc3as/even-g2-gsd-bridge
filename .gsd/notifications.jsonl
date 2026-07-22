@@ -1,4 +1,0 @@
-{"id":"e944719c-1d02-481e-92a1-51e050b7260a","ts":"2026-07-22T07:35:32.946Z","severity":"info","message":"GSD MCP Server Prepared at /opt/AI_projects/Even-g2-gsd-bridge/.mcp.json","source":"notify","read":false}
-{"id":"ac527e24-3c5e-46cc-9dd3-7fadb31e7c70","ts":"2026-07-22T08:35:51.433Z","severity":"warning","message":"Skipped compaction because there was no conversation history to summarize; history preserved.","source":"notify","read":false}
-{"id":"a0070463-da1b-43b6-887c-c50fb9a2fc04","ts":"2026-07-22T08:45:52.248Z","severity":"warning","message":"Skipped compaction because there was no conversation history to summarize; history preserved.","source":"notify","read":false}
-{"id":"f5d489c9-b890-4e9e-91c7-e41dd59ec123","ts":"2026-07-22T08:50:31.428Z","severity":"info","message":"The discussion is waiting for your approval - pausing before more tool calls run.","source":"notify","read":false}
