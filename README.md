@@ -132,6 +132,11 @@ install -m755 scripts/sersam ~/.local/bin/sersam   # then just run: sersam
 SERSAM_ROOT=/path/to/projects sersam               # if not /opt/AI_projects
 ```
 
+It needs **`bash` ≥ 4** (uses `mapfile`), **`tmux`**, and **`tput`** (from
+`ncurses`) plus the usual coreutils (`find`, `tr`, `sort`, `date`, `hostname`) —
+all standard on Linux. On Debian/Ubuntu: `sudo apt install tmux ncurses-bin`.
+A 24-bit-colour terminal renders the neon UI best, but it degrades gracefully.
+
 It lists every dir under `SERSAM_ROOT`, and `Enter` starts or resumes a `tmux`
 session named the same way the bridge expects. Not required — any launcher (or
 `ALLOW_SPAWN`) that produces those session names works.
@@ -278,6 +283,11 @@ Most riadi `tmux` relácie, ktoré už existujú — sám ich neštartuje. Na
 install -m755 scripts/sersam ~/.local/bin/sersam   # potom stačí: sersam
 SERSAM_ROOT=/cesta/k/projektom sersam              # ak nie /opt/AI_projects
 ```
+
+Potrebuje **`bash` ≥ 4** (používa `mapfile`), **`tmux`** a **`tput`** (z
+`ncurses`) plus bežné coreutils (`find`, `tr`, `sort`, `date`, `hostname`) —
+všetko štandard na Linuxe. Na Debiane/Ubuntu: `sudo apt install tmux ncurses-bin`.
+Neónové UI najlepšie vykreslí terminál s 24-bit farbami, ale degraduje elegantne.
 
 Nie je povinný — funguje ľubovoľný launcher (alebo `ALLOW_SPAWN`), ktorý vyrobí
 očakávané názvy relácií.
