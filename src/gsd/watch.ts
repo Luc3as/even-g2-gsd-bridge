@@ -75,18 +75,19 @@ export function tick(cfg: Config, now: number): void {
   }
   for (const p of projects) {
     if (!p.newestJsonl) continue;
-    if (!sessionHasClients(p.sessionId)) {
-      // Keep offset current so a future attach doesn't replay the whole history as "new".
-      const t = tails.get(p.sessionId);
-      if (t && t.file === p.newestJsonl) t.offset = p.mtimeMs ? statSizeSafe(p.newestJsonl) : t.offset;
-      else tails.set(p.sessionId, { file: p.newestJsonl, offset: statSizeSafe(p.newestJsonl), status: "idle" });
-      continue;
-    }
+    // Tail EVERY project, even with no SSE client attached, so the message ring
+    // keeps a rolling backlog. Otherwise any jsonl written while the glasses are
+    // disconnected (e.g. SSE dropped mid-turn) is skipped here AND never enters
+    // the ring, so a needReplay reconnect can't surface it — the answer is lost
+    // for good. emit()'s broadcast no-ops when there are no clients, so this only
+    // fills the ring; it costs nothing live.
     let t = tails.get(p.sessionId);
     if (!t || t.file !== p.newestJsonl) {
-      // New attach or file rotation: start from current end (ring already replayed history).
-      t = { file: p.newestJsonl, offset: 0, status: "idle" };
+      // First sight or file rotation: start at EOF so we tail forward without
+      // dumping the entire pre-existing transcript into the ring.
+      t = { file: p.newestJsonl, offset: statSizeSafe(p.newestJsonl), status: "idle" };
       tails.set(p.sessionId, t);
+      continue;
     }
     let chunk;
     try {
@@ -122,7 +123,8 @@ export function tick(cfg: Config, now: number): void {
     }
 
     // ANSWER-mode: a gsd picker leaves no jsonl trace, so scrape the live pane.
-    detectQuestion(p);
+    // Only meaningful when glasses are attached to answer it.
+    if (sessionHasClients(p.sessionId)) detectQuestion(p);
   }
 }
 
