@@ -15,6 +15,9 @@ Restart=on-failure
 RestartSec=3
 # tmux control needs the invoking user's session bus; keep default env.
 Environment=NODE_ENV=production
+# gsd lives in the npm-global prefix, which is not on systemd's minimal PATH.
+# Needed for the spawn-if-offline path (SPAWN_COMMAND=gsd).
+Environment=PATH=/home/lukas/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=default.target
