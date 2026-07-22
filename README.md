@@ -1,5 +1,7 @@
 # Even G2 ↔ GSD-PI bridge
 
+*[Slovenská verzia nižšie ↓](#slovensky)*
+
 View and steer your live [GSD-PI](https://opengsd.net/) coding agents from **Even
 Realities G2** glasses — across projects, over your WireGuard tunnel, hands-free
 with dictation. No sideloading, no re-pairing on the road.
@@ -19,6 +21,20 @@ G2 (Terminal Mode · R1 ring + dictation)
         ├ PICK   voice → "say a number" → digit keystroke into the gsd picker
         └ SWITCH one session per project (native Even picker = sersám mirror)
 ```
+
+## Why this exists
+
+The agent runs on a rig at the desk. You are not — you're on the couch, in the
+kitchen, or on the road. You want to check *"did the build pass, did it get stuck
+on a permission dialog, what did it just answer"* — and nudge it — **without
+pulling out a laptop, unlocking a phone, or SSH-ing in.**
+
+The G2 glasses already have a screen, a dictation mic, and a ring for input; the
+stock Even App already speaks a Terminal protocol over the network. The missing
+piece was a host-side adapter mapping that protocol onto a **live GSD-PI agent in
+tmux** — read its answers, forward your dictated prompts — without becoming a
+second process fighting the desk agent for the same transcript. This bridge is
+that piece.
 
 ## What you can do from the glasses
 
@@ -53,6 +69,17 @@ G2 (Terminal Mode · R1 ring + dictation)
   and persist* on the lens took reverse-engineering the exact wire sequence — see
   [`docs/PROTOCOL.md`](docs/PROTOCOL.md). This is the least obvious part of the
   project and the most important to read before touching the emit path.
+
+## What it needs to run
+
+- **Node ≥ 20** on the rig where the agents run.
+- **GSD-PI** writing transcripts under `~/.gsd/sessions/` or `~/.gsd/agent/sessions/`.
+- **tmux** sessions named the `sersám` way (`sname`: non `[A-Za-z0-9_-]` → `_`), so
+  the bridge's `send-keys` targets line up with the desk launcher's panes.
+- **Even Realities G2** + phone Even App in Terminal Mode, reachable to the rig —
+  on the LAN, or over a **WireGuard** tunnel (that's the on-the-road case).
+- No cloud, no account. Auth is a single bearer token (fix it via `BRIDGE_TOKEN`
+  so restarts don't force a re-pair).
 
 ## Run
 
@@ -136,5 +163,84 @@ npm run typecheck
 ```
 
 ## License
+
+MIT.
+
+---
+
+<a name="slovensky"></a>
+
+# Even G2 ↔ GSD-PI most (slovensky)
+
+Sleduj a riaď svojich živých [GSD-PI](https://opengsd.net/) kódovacích agentov z
+okuliarov **Even Realities G2** — naprieč projektmi, cez WireGuard tunel, hlasom.
+Bez sideloadingu, bez opätovného párovania na cestách.
+
+Most hovorí **oficiálnym `@evenrealities/even-terminal` HTTP/SSE protokolom**, takže
+sa naň bežná Even App (Terminal Mode) pripojí bez úprav. Je to adaptér typu
+*pripoj-sa-k-živému*: nikdy nevlastní tvojich agentov. Číta ich gsd-natívne `jsonl`
+transkripty a vkladá prompty do tých istých `tmux` relácií, ktoré už riadi tvoj
+`sersám` launcher.
+
+## Prečo to vzniklo
+
+Agent beží na stroji pri stole. Ty nie — si na gauči, v kuchyni alebo na cestách.
+Chceš skontrolovať *„prešiel build, zasekol sa na permission dialógu, čo práve
+odpovedal"* — a postrčiť ho — **bez toho, aby si vytiahol notebook, odomkol telefón
+alebo sa SSH-oval dnu.**
+
+Okuliare G2 už majú displej, diktovací mikrofón aj prsteň na ovládanie; bežná Even
+App už hovorí Terminal protokolom cez sieť. Chýbal len hostiteľský adaptér, ktorý
+ten protokol namapuje na **živého GSD-PI agenta v tmuxe** — číta jeho odpovede,
+posiela tvoje nadiktované prompty — bez toho, aby sa stal druhým procesom bojujúcim
+o ten istý transkript. Tento most je práve to.
+
+## Čo môžeš robiť z okuliarov
+
+- **Vidieť, čo každý agent povedal**, naprieč projektmi, najnovšia aktivita hore.
+  Zoznam projektov je živé zrkadlo `sersámu`: `[Yummy] ● posledný príkaz`, kde
+  `●` = živá `tmux` relácia, `○` = offline. Podtitulok sleduje **posledný** prompt.
+- **Nadiktovať nový prompt** do ľubovoľného projektu. Ak projekt nemá živú reláciu,
+  most na požiadanie spustí `tmux` + `gsd` (`ALLOW_SPAWN`).
+- **Odpovedať na interaktívne otázky agenta hlasom.** gsd TUI výbery (single- aj
+  multi-select) sú zredukované na *„povedz číslo"* — most zosníma otvorený výber z
+  `tmux` panelu a namapuje vyslovenú číslicu na správny stlačený kláves.
+- **Odpovedať na next-steps menu číslom.** Keď odpoveď končí menu `Ďalej?` /
+  `Next steps:`, povedať `2` deterministicky spustí možnosť 2 (popis sa rozvinie
+  ešte pred tým, než sa dostane k modelu, takže si nemôže znova prečítať vlastný
+  zoznam a rozhodnúť sa inak).
+
+## Čo treba na spustenie
+
+- **Node ≥ 20** na stroji, kde bežia agenti.
+- **GSD-PI** zapisujúce transkripty do `~/.gsd/sessions/` alebo `~/.gsd/agent/sessions/`.
+- **tmux** relácie pomenované ako `sersám` (`sname`: znaky mimo `[A-Za-z0-9_-]` → `_`).
+- **Even Realities G2** + telefón s Even App v Terminal Mode, dosiahnuteľný na stroj —
+  na LAN, alebo cez **WireGuard** tunel (scenár na cestách).
+- Žiaden cloud, žiaden účet. Autentifikácia je jeden bearer token (fixný cez
+  `BRIDGE_TOKEN`, aby reštart nevynútil opätovné párovanie).
+
+## Spustenie
+
+```bash
+npm install
+npm run build
+npm start            # vypíše QR + token; naskenuj ho v Even App
+```
+
+Potom v Even App → **Terminal Mode** → naskenuj QR (alebo zadaj
+`http://<ip-stroja>:3456?token=…`). Konfiguráciu, deploy cez systemd, health-check
+a endpointy pozri v anglickej sekcii vyššie. Detaily protokolu a architektúry sú v
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md) a [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Testy
+
+```bash
+npm test        # jsonl parser, odvodenie stavu, zmenšenie na 576×288,
+                # enumerácia projektov, parsovanie výberov, detekcia menu, SSE emit
+npm run typecheck
+```
+
+## Licencia
 
 MIT.
