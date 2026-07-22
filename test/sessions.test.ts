@@ -43,3 +43,27 @@ test("listProjects reads cwd from the session line, not the lossy slug", () => {
   assert.equal(projects[0]!.sessionId, slug);
   assert.equal(projects[0]!.title, "hello world");
 });
+
+test("listProjects title tracks the LATEST user prompt, not the first", () => {
+  const root = mkdtempSync(join(tmpdir(), "gsd-sess-"));
+  const dir = join(root, "--opt-AI_projects-Even-g2-gsd-bridge--");
+  mkdirSync(dir);
+  const cwd = "/opt/AI_projects/Even-g2-gsd-bridge";
+  const msg = (role: string, text: string) =>
+    JSON.stringify({ type: "message", message: { role, content: [{ type: "text", text }] } });
+  writeFileSync(
+    join(dir, "s.jsonl"),
+    [
+      JSON.stringify({ type: "session", id: "s", cwd, timestamp: "2026-07-22T08:00:00.000Z" }),
+      msg("user", "first command"),
+      msg("assistant", "some long answer"),
+      msg("user", "latest command"),
+      msg("assistant", "trailing answer"),
+    ].join("\n") + "\n",
+  );
+
+  const projects = listProjects([root], ["/opt/AI_projects"]);
+  rmSync(root, { recursive: true, force: true });
+
+  assert.equal(projects[0]!.title, "latest command");
+});

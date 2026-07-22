@@ -42,16 +42,26 @@ function readFirstLine(path: string, max = 4096): string {
   }
 }
 
-/** Read a short title hint: first user prompt text, scanning a small window. */
+/**
+ * Read a short title hint: the LATEST user prompt text. Scans a tail window so
+ * the project-list subtitle tracks the newest command, not the session's first
+ * one — the list is sorted by activity, so a frozen first-prompt subtitle reads
+ * as stale ("even-g2 still shows the old command"). Lines are walked back-to-
+ * front; the first user message found is the most recent. A partial line at the
+ * window's leading edge just fails to parse and is skipped.
+ */
 function readTitleHint(path: string): string {
   try {
+    const size = statSync(path).size;
+    const window = 131072; // 128 KiB tail is enough to hold the last turn
+    const start = Math.max(0, size - window);
     const fd = openSync(path, "r");
     try {
-      const buf = Buffer.alloc(65536);
-      const n = readSync(fd, buf, 0, buf.length, 0);
-      const chunk = buf.subarray(0, n).toString("utf8");
-      for (const line of chunk.split("\n")) {
-        const e = parseLine(line);
+      const buf = Buffer.alloc(size - start);
+      const n = readSync(fd, buf, 0, buf.length, start);
+      const lines = buf.subarray(0, n).toString("utf8").split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const e = parseLine(lines[i]!);
         if (e?.type === "message" && e.message?.role === "user") {
           const c = e.message.content;
           const text =
