@@ -74,8 +74,11 @@ that piece.
 
 - **Node ≥ 20** on the rig where the agents run.
 - **GSD-PI** writing transcripts under `~/.gsd/sessions/` or `~/.gsd/agent/sessions/`.
-- **tmux** sessions named the `sersám` way (`sname`: non `[A-Za-z0-9_-]` → `_`), so
-  the bridge's `send-keys` targets line up with the desk launcher's panes.
+- **tmux** sessions named by project basename (`sname`: non `[A-Za-z0-9_-]` → `_`),
+  so the bridge's `send-keys` targets line up with the desk launcher's panes. Any
+  launcher that follows this naming works; a ready-made neon TUI one ships in
+  [`scripts/sersam`](scripts/sersam) (the launcher this bridge was built against).
+  Or skip it entirely and let the bridge spawn sessions on demand (`ALLOW_SPAWN`).
 - **Even Realities G2** + phone Even App in Terminal Mode, reachable to the rig —
   on the LAN, or over a **WireGuard** tunnel (that's the on-the-road case).
 - No cloud, no account. Auth is a single bearer token (fix it via `BRIDGE_TOKEN`
@@ -118,6 +121,36 @@ cp systemd/even-g2-gsd-bridge.service ~/.config/systemd/user/
 systemctl --user enable --now even-g2-gsd-bridge
 loginctl enable-linger "$USER"            # keep running while logged out
 ```
+
+### The desk launcher (optional)
+
+The bridge steers whatever `tmux` sessions already exist — it doesn't start them.
+To start/resume/kill them from the desk, use the bundled launcher:
+
+```bash
+install -m755 scripts/sersam ~/.local/bin/sersam   # then just run: sersam
+SERSAM_ROOT=/path/to/projects sersam               # if not /opt/AI_projects
+```
+
+It lists every dir under `SERSAM_ROOT`, and `Enter` starts or resumes a `tmux`
+session named the same way the bridge expects. Not required — any launcher (or
+`ALLOW_SPAWN`) that produces those session names works.
+
+## Usage (once running)
+
+After the bridge runs and the Even App is paired (scan the QR once):
+
+1. **Open Terminal Mode** on the G2. The native session picker is a live mirror
+   of your projects, newest activity on top: `[Project] ● latest prompt` — `●` a
+   live `tmux` session, `○` offline.
+2. **Pick a project** with the R1 ring; you see that agent's latest exchange,
+   shrunk to the 576×288 lens.
+3. **Dictate a prompt.** It is injected into that project's `tmux` pane as if you
+   typed it at the desk. If the project is offline, the bridge spawns `tmux` +
+   `gsd` first (`ALLOW_SPAWN`).
+4. **Answer by voice.** When gsd opens a picker, say the option number ("two") —
+   the bridge maps it to the keystroke. When an answer ends in a `Ďalej?` /
+   `Next steps:` menu, saying a number runs that option deterministically.
 
 ## Health / diagnostics
 
@@ -214,7 +247,10 @@ o ten istý transkript. Tento most je práve to.
 
 - **Node ≥ 20** na stroji, kde bežia agenti.
 - **GSD-PI** zapisujúce transkripty do `~/.gsd/sessions/` alebo `~/.gsd/agent/sessions/`.
-- **tmux** relácie pomenované ako `sersám` (`sname`: znaky mimo `[A-Za-z0-9_-]` → `_`).
+- **tmux** relácie pomenované podľa názvu projektu (`sname`: znaky mimo
+  `[A-Za-z0-9_-]` → `_`). Funguje ľubovoľný launcher s týmto pomenovaním; hotový
+  neonový TUI launcher je v [`scripts/sersam`](scripts/sersam). Alebo ho vynechaj
+  a nech relácie spustí most sám (`ALLOW_SPAWN`).
 - **Even Realities G2** + telefón s Even App v Terminal Mode, dosiahnuteľný na stroj —
   na LAN, alebo cez **WireGuard** tunel (scenár na cestách).
 - Žiaden cloud, žiaden účet. Autentifikácia je jeden bearer token (fixný cez
@@ -232,6 +268,31 @@ Potom v Even App → **Terminal Mode** → naskenuj QR (alebo zadaj
 `http://<ip-stroja>:3456?token=…`). Konfiguráciu, deploy cez systemd, health-check
 a endpointy pozri v anglickej sekcii vyššie. Detaily protokolu a architektúry sú v
 [`docs/PROTOCOL.md`](docs/PROTOCOL.md) a [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Desk launcher (voliteľné)
+
+Most riadi `tmux` relácie, ktoré už existujú — sám ich neštartuje. Na
+štart/resume/kill z desktopu použi priložený launcher:
+
+```bash
+install -m755 scripts/sersam ~/.local/bin/sersam   # potom stačí: sersam
+SERSAM_ROOT=/cesta/k/projektom sersam              # ak nie /opt/AI_projects
+```
+
+Nie je povinný — funguje ľubovoľný launcher (alebo `ALLOW_SPAWN`), ktorý vyrobí
+očakávané názvy relácií.
+
+## Používanie (keď most beží)
+
+Po spustení mosta a spárovaní (QR raz):
+
+1. **Otvor Terminal Mode** na G2 — picker je živé zrkadlo projektov, najnovšie
+   hore: `[Projekt] ● posledný prompt` (`●` živá relácia, `○` offline).
+2. **Vyber projekt** prsteňom R1 — uvidíš poslednú výmenu agenta.
+3. **Nadiktuj prompt** — vloží sa do `tmux` panelu projektu. Offline projekt most
+   najprv spustí (`ALLOW_SPAWN`).
+4. **Odpovedaj hlasom** — pri výbere povedz číslo možnosti; pri `Ďalej?` menu
+   tiež číslo spustí danú možnosť.
 
 ## Testy
 

@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# Veduckov Kodovaci Sersam — TUI launcher pre /opt/AI_projects
+# neonpunk, responsive, sipky/jk navigacia, tmux start/resume/kill
+#
+# OPTIONAL companion to even-g2-gsd-bridge. The bridge does NOT require it — it
+# only needs tmux sessions named by project basename (sname: non [A-Za-z0-9_-]
+# -> _). This launcher just automates start/resume/kill of those sessions and is
+# the tool the bridge was built against. Set SERSAM_ROOT to your projects dir
+# (default /opt/AI_projects); drop it on PATH (e.g. ~/.local/bin/sersam).
+
+# UTF-8 locale (aby ${#s} ratalo znaky, nie bajty -> spravne centrovanie)
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+  *UTF-8|*utf8|*UTF8) : ;;
+  *) export LC_ALL=C.UTF-8 ;;
+esac
+
+ROOT="${SERSAM_ROOT:-/opt/AI_projects}"
+
+ESC=$'\033'
+reset="${ESC}[0m"; bold="${ESC}[1m"; dim="${ESC}[2m"
+fg(){ printf '%s[38;2;%s;%s;%sm' "$ESC" "$1" "$2" "$3"; }
+PINK=$(fg 255 46 189); MAG=$(fg 200 0 255); PURP=$(fg 140 90 240)
+BLUE=$(fg 70 150 255); CYAN=$(fg 0 240 255); GREEN=$(fg 70 255 130)
+GREY=$(fg 120 120 145); YEL=$(fg 255 220 90); RED=$(fg 255 80 110)
+SELBG="${ESC}[48;2;45;12;70m"
+
+cols(){ tput cols 2>/dev/null || echo "${COLUMNS:-80}"; }
+lines(){ tput lines 2>/dev/null || echo "${LINES:-24}"; }
+pad_for(){ local len=$1 w=$2 p; p=$(( (w-len)/2 )); ((p<0))&&p=0; printf '%*s' "$p" ''; }
+cline(){ local s="$1" col="$2" w; w=$(cols); printf '%s%s%s%s\n' "$(pad_for ${#s} "$w")" "$col" "$s" "$reset"; }
+rule(){ local w bw; w=$(cols); bw=$(( w-6 )); ((bw>56))&&bw=56; ((bw<10))&&bw=10
+  local line; line=$(printf '%*s' "$bw" ''); line=${line// /─}
+  printf '%s%s░▒▓%s%s%s▓▒░%s\n' "$(pad_for $((bw+6)) "$w")" "$PURP" "$CYAN" "$line" "$PURP" "$reset"; }
+
+banner(){ local w; w=$(cols); printf '\n'
+  if (( w >= 44 )); then
+    local rows=(
+"█████ █████ ████  █████ █████ █   █"
+"█     █     █   █ █     █   █ ██ ██"
+"█████ ████  ████  █████ █████ █ █ █"
+"    █ █     █  █      █ █   █ █   █"
+"█████ █████ █   █ █████ █   █ █   █"
+    )
+    local pal=("$PINK" "$MAG" "$PURP" "$BLUE" "$CYAN") i=0
+    for r in "${rows[@]}"; do printf '%s%s%s%s%s\n' "$(pad_for 35 "$w")" "${pal[$i]}" "$bold" "$r" "$reset"; ((i++)); done
+  else cline "/// SERSÁM ///" "$CYAN$bold"; fi
+  cline "« VEDÚCKOV  KÓDOVACÍ  SERSÁM »" "$PINK$bold"
+  cline ">> jack in <<" "$GREY"
+  rule; }
+
+list_dirs(){ [ -d "$ROOT" ] || return 0
+  find "$ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -f; }
+sname(){ printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_'; }
+
+hide_cursor(){ printf '%s[?25l' "$ESC"; }
+show_cursor(){ printf '%s[?25h' "$ESC"; }
+trap 'show_cursor' EXIT INT TERM
+
+start_session(){ local dir="$1" name="$2" sn; sn=$(sname "$name")
+  tmux has-session -t "=$sn" 2>/dev/null || tmux new-session -d -s "$sn" -c "$dir"
+  if [ -n "${TMUX:-}" ]; then tmux switch-client -t "=$sn"; else tmux attach-session -t "=$sn"; fi; }
+
+open_sel(){ local d="$1" nm="$2"; show_cursor; clear
+  if [ -n "${TMUX:-}" ]; then start_session "$d" "$nm"; exit 0
+  else start_session "$d" "$nm"; hide_cursor; fi; }
+
+kill_sel(){ local nm="$1" sn lm w; sn=$(sname "$nm"); w=$(cols); lm=$(pad_for 56 "$w")
+  if ! tmux has-session -t "=$sn" 2>/dev/null; then
+    show_cursor; printf '\n%s %s( %s nemá bežiacu session )%s' "$lm" "$dim" "$nm" "$reset"; sleep 1; hide_cursor; return; fi
+  show_cursor; printf '\n%s %szabiť session %s%s%s ? [y/N] %s' "$lm" "$RED" "$bold" "$nm" "$reset$RED" "$reset"
+  local a; IFS= read -rsn1 a
+  [[ $a =~ ^[yYaA]$ ]] && tmux kill-session -t "=$sn" 2>/dev/null
+  hide_cursor; }
+
+draw(){ local sel=$1 top=$2 page=$3 query=$4 searching=$5 numbuf=$6 w bw lm; w=$(cols); bw=$(( w<60 ? w-4 : 56 )); ((bw<24))&&bw=24; lm=$(pad_for "$bw" "$w")
+  printf '%s[H%s[J' "$ESC" "$ESC"
+  banner
+  local host ts n total; host=$(hostname -s 2>/dev/null || hostname); ts=$(date +%H:%M); n=${#FILTERED[@]}; total=${#DIRS[@]}
+  if [[ -n $query ]]; then
+    printf '%s%s host:%s%s %s│%s zhoda:%s%s%s/%s%s %s│%s %s%s\n\n' \
+      "$lm" "$GREY" "$CYAN" "$host" "$GREY" "$GREY" "$GREEN" "$n" "$GREY" "$total" "$GREY" "$GREY" "$GREY" "$ts" "$reset"
+  else
+    printf '%s%s host:%s%s %s│%s projekty:%s%s %s│%s %s%s\n\n' \
+      "$lm" "$GREY" "$CYAN" "$host" "$GREY" "$GREY" "$GREEN" "$total" "$GREY" "$GREY" "$GREY" "$ts" "$reset"
+  fi
+  [ -n "${TMUX:-}" ] && printf '%s%s si v tmux session — ⏎ prepne, Ctrl-b d odpojí%s\n\n' "$lm" "$dim" "$reset"
+  (( total == 0 )) && printf '%s%s   ( žiadne projekty — stlač n )%s\n\n' "$lm" "$dim" "$reset"
+  (( total > 0 && n == 0 )) && printf '%s%s   ( žiadna zhoda pre „%s" )%s\n\n' "$lm" "$dim" "$query" "$reset"
+  (( top > 0 )) && printf '%s   %s▲ %d vyššie%s\n' "$lm" "$dim" "$top" "$reset"
+  local i=$top end=$(( top+page )); (( end>n )) && end=$n
+  local nm sn nmax disp active seldot sellbl dot label; nmax=$(( bw-16 )); ((nmax>26))&&nmax=26
+  while (( i < end )); do
+    nm="${FILTERED[i]}"; sn=$(sname "$nm")
+    if tmux has-session -t "=$sn" 2>/dev/null; then active=1; else active=0; fi
+    disp="$nm"; (( ${#disp} > nmax )) && disp="${disp:0:nmax-1}…"
+    if (( i == sel )); then
+      if (( active )); then seldot="●"; sellbl="resume"; else seldot="○"; sellbl="start"; fi
+      printf '%s%s ▶ [%2d] %s %-*s   %s%s[K%s\n' \
+        "$lm" "$SELBG$bold$CYAN" "$((i+1))" "$seldot" "$nmax" "$disp" "$sellbl" "$ESC" "$reset"
+    else
+      if (( active )); then dot="${GREEN}●${reset}"; label="${GREEN}resume${reset}"; else dot="${GREY}○${reset}"; label="${dim}start${reset}"; fi
+      printf '%s   [%s%2d%s] %s %s%-*s%s %s\n' \
+        "$lm" "$CYAN" "$((i+1))" "$reset" "$dot" "$CYAN" "$nmax" "$disp" "$reset" "$label"
+    fi
+    ((i++))
+  done
+  (( end < n )) && printf '%s   %s▼ %d nižšie%s\n' "$lm" "$dim" "$(( n-end ))" "$reset"
+  printf '\n'
+  if (( searching )); then
+    printf '%s %s/%s%s%s%s█%s  %s⏎%s otvor  %s⌫%s maž  %s⎋%s zruš%s\n' \
+      "$lm" "$YEL" "$reset" "$CYAN$bold" "$query" "$reset" "$YEL" "$CYAN" "$dim" "$CYAN" "$dim" "$CYAN" "$dim" "$reset"
+  elif [[ -n $numbuf ]]; then
+    printf '%s %s#%s%s%s%s█%s  %s⏎%s skoč na projekt  %s⎋%s zruš%s\n' \
+      "$lm" "$YEL" "$reset" "$CYAN$bold" "$numbuf" "$reset" "$YEL" "$CYAN" "$dim" "$CYAN" "$dim" "$reset"
+  else
+    printf '%s %s↑↓/jk%s pohyb  %s⏎%s otvor  %s/al.znak%s hľadaj  %s#%s skok  %s[n]%s nový  %s[x]%s zabiť  %s[q]%s koniec%s\n' \
+      "$lm" "$CYAN" "$dim" "$CYAN" "$dim" "$YEL" "$dim" "$YEL" "$dim" "$YEL" "$dim" "$RED" "$dim" "$RED" "$dim" "$reset"
+  fi
+  printf '%s %stmux:  Ctrl-b d%s = odpoj (beží ďalej)   %s·%s   v session:  exit%s = ukončí%s\n' \
+    "$lm" "$GREY" "$dim" "$dim" "$GREY" "$dim" "$reset"; }
+
+new_project(){ local w lm name; w=$(cols); lm=$(pad_for 56 "$w")
+  show_cursor; printf '\n%s %snázov nového projektu:%s ' "$lm" "$YEL" "$reset"; read -r name
+  name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+  if [ -z "$name" ] || [[ "$name" == */* ]]; then printf '%s %sneplatný názov.%s\n' "$lm" "$RED" "$reset"; sleep 1; return; fi
+  mkdir -p "$ROOT/$name" || { printf '%s %snepodarilo sa vytvoriť.%s\n' "$lm" "$RED" "$reset"; sleep 1; return; }
+  open_sel "$ROOT/$name" "$name"; }
+
+read_key(){ local rest; IFS= read -rsn1 KEY || return 1
+  if [[ $KEY == "$ESC" ]]; then IFS= read -rsn2 -t 0.30 rest 2>/dev/null; KEY+="$rest"; fi; return 0; }
+
+filter_dirs(){ FILTERED=()
+  if [[ -z $QUERY ]]; then FILTERED=("${DIRS[@]}"); return; fi
+  local qlc=${QUERY,,} nm
+  for nm in "${DIRS[@]}"; do [[ ${nm,,} == *"$qlc"* ]] && FILTERED+=("$nm"); done; }
+
+menu(){ local sel=0 top=0 searching=0 numbuf=""; QUERY=""; hide_cursor
+  while true; do
+    mapfile -t DIRS < <(list_dirs)
+    filter_dirs; local n=${#FILTERED[@]}
+    (( sel >= n )) && sel=$(( n>0 ? n-1 : 0 )); (( sel < 0 )) && sel=0
+    local page; page=$(( $(lines) - 15 )); (( page < 4 )) && page=4
+    (( sel < top )) && top=$sel
+    (( sel >= top+page )) && top=$(( sel-page+1 ))
+    (( top < 0 )) && top=0
+    draw "$sel" "$top" "$page" "$QUERY" "$searching" "$numbuf"
+    read_key || break
+    if (( searching )); then
+      case "$KEY" in
+        ''|$'\n'|$'\r') (( n>0 )) && open_sel "$ROOT/${FILTERED[sel]}" "${FILTERED[sel]}" ;;
+        "$ESC") searching=0; QUERY=""; sel=0; top=0 ;;
+        $'\177'|$'\b') QUERY="${QUERY%?}"; sel=0; top=0 ;;
+        "${ESC}[A"|"${ESC}OA") (( n>0 )) && sel=$(( (sel-1+n)%n )) ;;
+        "${ESC}[B"|"${ESC}OB") (( n>0 )) && sel=$(( (sel+1)%n )) ;;
+        [[:print:]]) QUERY+="$KEY"; sel=0; top=0 ;;
+      esac
+    elif [[ -n $numbuf ]]; then
+      case "$KEY" in
+        [0-9]) numbuf+="$KEY"; (( 10#$numbuf>=1 && 10#$numbuf<=n )) && { sel=$(( 10#$numbuf-1 )); top=0; } ;;
+        ''|$'\n'|$'\r') (( 10#$numbuf>=1 && 10#$numbuf<=n )) && open_sel "$ROOT/${FILTERED[10#$numbuf-1]}" "${FILTERED[10#$numbuf-1]}"; numbuf="" ;;
+        $'\177'|$'\b') numbuf="${numbuf%?}" ;;
+        *) numbuf="" ;;
+      esac
+    else
+      case "$KEY" in
+        "${ESC}[A"|"${ESC}OA"|k|K) (( n>0 )) && sel=$(( (sel-1+n)%n )) ;;
+        "${ESC}[B"|"${ESC}OB"|j|J) (( n>0 )) && sel=$(( (sel+1)%n )) ;;
+        ''|$'\n'|$'\r') (( n>0 )) && open_sel "$ROOT/${FILTERED[sel]}" "${FILTERED[sel]}" ;;
+        /) searching=1; QUERY=""; sel=0; top=0 ;;
+        x|X) (( n>0 )) && kill_sel "${FILTERED[sel]}" ;;
+        n|N) new_project ;;
+        q|Q) break ;;
+        [0-9]) numbuf="$KEY"; (( 10#$numbuf>=1 && 10#$numbuf<=n )) && { sel=$(( 10#$numbuf-1 )); top=0; } ;;
+        "$ESC") : ;;
+        [[:print:]]) searching=1; QUERY="$KEY"; sel=0; top=0 ;;
+      esac
+    fi
+  done
+  show_cursor; clear; cline ">> odpojené. zbohom, vedúcko. <<" "$PURP"; printf '\n'; }
+
+main(){
+  if [ ! -d "$ROOT" ]; then printf '%s%s nenašiel som %s%s\n' "$RED" "$bold" "$ROOT" "$reset"
+    read -rp " vytvoriť? [a/N] " yn; [[ $yn =~ ^[aAyY]$ ]] && mkdir -p "$ROOT" || exit 1; fi
+  menu; }
+main "$@"
+
