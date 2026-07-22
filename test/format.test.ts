@@ -16,16 +16,19 @@ test("shrink clips over-long single lines", () => {
   assert.ok(out.split("\n")[0]!.length <= 90);
 });
 
-test("toGlassesHistory folds tool calls into assistant text and limits", () => {
+test("toGlassesHistory leads with prose, folds tool calls beneath, drops tool output", () => {
   const turns: Turn[] = [
     { role: "user", text: "hi", tools: [] },
     { role: "assistant", text: "ok", tools: ["Bash: run tests"] },
-    { role: "tool", text: "", tools: [] },
+    { role: "tool", text: "M .gsd/CODEBASE.md\nM .gsd/hook-state.json", tools: [] },
     { role: "assistant", text: "done", tools: [] },
   ];
-  const h = toGlassesHistory(turns, 2);
-  assert.equal(h.length, 2);
-  assert.equal(h[0]!.role, "assistant");
-  assert.ok(h[0]!.text.includes("> Bash: run tests"));
-  assert.equal(h[1]!.text, "done");
+  const h = toGlassesHistory(turns, 3);
+  // The raw tool-result dump must never reach the glasses.
+  assert.ok(!h.some((e) => e.role === "tool"));
+  assert.ok(!h.some((e) => e.text.includes("CODEBASE.md")));
+  const firstAssistant = h.find((e) => e.role === "assistant")!;
+  // Prose leads, tool-call summary folds beneath it.
+  assert.ok(firstAssistant.text.startsWith("ok"));
+  assert.ok(firstAssistant.text.includes("> Bash: run tests"));
 });

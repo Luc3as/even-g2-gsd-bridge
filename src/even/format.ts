@@ -23,10 +23,15 @@ export function shrink(text: string, maxChars = MAX_TURN_CHARS): string {
 export function toGlassesHistory(turns: Turn[], limit: number): Array<{ role: string; text: string }> {
   const out: Array<{ role: string; text: string }> = [];
   for (const t of turns) {
+    // Raw tool-result output (git-status dumps, file lists) is noise on the
+    // 576x288 canvas; the assistant's own prose already summarizes it. Drop it
+    // so the glasses lead with what the agent said, not command output.
+    if (t.role === "tool") continue;
     let text = t.text;
     if (t.role === "assistant" && t.tools.length) {
+      // Lead with the agent's prose; fold tool-call summaries beneath it.
       const toolLines = t.tools.map((x) => `> ${x}`).join("\n");
-      text = text ? `${toolLines}\n${text}` : toolLines;
+      text = text ? `${text}\n${toolLines}` : toolLines;
     }
     if (!text.trim()) continue;
     out.push({ role: t.role, text: shrink(text) });
