@@ -1,0 +1,133 @@
+import { statSync, openSync, readSync, closeSync } from "node:fs";
+import type { Config } from "../config.js";
+import { emit, sessionHasClients } from "../server/events.js";
+import { parseLine, blocksToText, deriveStatusFromEntry } from "./jsonl.js";
+import { listProjects } from "./sessions.js";
+import { log } from "../log.js";
+
+/**
+ * Poll-based tailer. fs.watch is unreliable across network/overlay FS, so we
+ * poll: every tick, for each project that currently has an SSE client, read new
+ * bytes from its newest transcript, normalize appended entries into
+ * even-messages, and emit them. Byte offsets are tracked per sessionId so a
+ * newly-attached client gets a full replay from the ring, then live deltas.
+ */
+
+interface TailState {
+  file: string;
+  offset: number;
+  status: "busy" | "idle";
+}
+
+const tails = new Map<string, TailState>();
+
+function readFrom(path: string, offset: number): { data: string; newOffset: number } {
+  const st = statSync(path);
+  if (st.size <= offset) return { data: "", newOffset: st.size < offset ? st.size : offset };
+  const fd = openSync(path, "r");
+  try {
+    const len = st.size - offset;
+    const buf = Buffer.alloc(len);
+    const n = readSync(fd, buf, 0, len, offset);
+    return { data: buf.subarray(0, n).toString("utf8"), newOffset: offset + n };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function emitEntry(sessionId: string, line: string): void {
+  const e = parseLine(line);
+  if (!e) return;
+  if (e.type === "model_change" && e.modelId) {
+    emit(sessionId, { type: "info", model: String(e.modelId) });
+    return;
+  }
+  if (e.type !== "message" || !e.message) return;
+  const role = e.message.role;
+  const { text, tools } = blocksToText(e.message.content);
+  if (!text && tools.length === 0) return;
+  if (role === "assistant") {
+    for (const tool of tools) emit(sessionId, { type: "tool_call", text: `> ${tool}`, ts: e.timestamp });
+    if (text) emit(sessionId, { type: "agent_message", text, ts: e.timestamp });
+  } else if (role === "user") {
+    emit(sessionId, { type: "user_prompt", text, ts: e.timestamp });
+  } else if (role === "toolResult") {
+    if (text.trim()) emit(sessionId, { type: "tool_result", text: text.slice(0, 200), ts: e.timestamp });
+  }
+}
+
+/**
+ * One tail tick. Exposed for tests. Discovers current projects, tails those
+ * with clients, resets offset if the active transcript file rotated.
+ */
+export function tick(cfg: Config, now: number): void {
+  let projects;
+  try {
+    projects = listProjects(cfg.sessionsDir, cfg.projectRoots);
+  } catch (err) {
+    log.error("watch", "listProjects failed", err);
+    return;
+  }
+  for (const p of projects) {
+    if (!p.newestJsonl) continue;
+    if (!sessionHasClients(p.sessionId)) {
+      // Keep offset current so a future attach doesn't replay the whole history as "new".
+      const t = tails.get(p.sessionId);
+      if (t && t.file === p.newestJsonl) t.offset = p.mtimeMs ? statSizeSafe(p.newestJsonl) : t.offset;
+      else tails.set(p.sessionId, { file: p.newestJsonl, offset: statSizeSafe(p.newestJsonl), status: "idle" });
+      continue;
+    }
+    let t = tails.get(p.sessionId);
+    if (!t || t.file !== p.newestJsonl) {
+      // New attach or file rotation: start from current end (ring already replayed history).
+      t = { file: p.newestJsonl, offset: 0, status: "idle" };
+      tails.set(p.sessionId, t);
+    }
+    let chunk;
+    try {
+      chunk = readFrom(t.file, t.offset);
+    } catch (err) {
+      log.error("watch", `read failed ${t.file}`, err);
+      continue;
+    }
+    if (chunk.data) {
+      const lines = chunk.data.split("\n");
+      // Last element may be a partial line; only advance past complete lines.
+      const complete = chunk.data.endsWith("\n") ? lines : lines.slice(0, -1);
+      let consumed = 0;
+      for (const line of complete) {
+        emitEntry(p.sessionId, line);
+        consumed += Buffer.byteLength(line, "utf8") + 1;
+      }
+      t.offset += consumed;
+      // Status transition detection off the last complete entry.
+      const last = complete[complete.length - 1];
+      if (last) {
+        const st = deriveStatusFromEntry(last);
+        if (st && st !== t.status) {
+          t.status = st;
+          emit(p.sessionId, { type: "status", state: st });
+        }
+      }
+    }
+    // Idle-by-silence: no writes within busy window flips busy→idle.
+    if (t.status === "busy" && now - p.mtimeMs > cfg.busyWindowMs) {
+      t.status = "idle";
+      emit(p.sessionId, { type: "status", state: "idle" });
+    }
+  }
+}
+
+function statSizeSafe(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return 0;
+  }
+}
+
+export function startWatcher(cfg: Config): () => void {
+  const timer = setInterval(() => tick(cfg, Date.now()), cfg.tailIntervalMs);
+  log.info("watch", `tailer started (interval=${cfg.tailIntervalMs}ms)`);
+  return () => clearInterval(timer);
+}

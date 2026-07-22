@@ -1,0 +1,34 @@
+{
+  "mcpServers": {
+    "gsd-workflow": {
+      "command": "/usr/bin/node",
+      "args": [
+        "/home/lukas/.npm-global/lib/node_modules/@opengsd/gsd-pi/packages/mcp-server/dist/cli.js"
+      ],
+      "cwd": "/opt/AI_projects/Even-g2-gsd-bridge",
+      "env": {
+        "GSD_CLI_PATH": "/home/lukas/.npm-global/bin/gsd",
+        "GSD_BIN_PATH": "/home/lukas/.npm-global/bin/gsd",
+        "GSD_WORKFLOW_EXECUTORS_MODULE": "/home/lukas/.gsd/agent/extensions/gsd/tools/workflow-tool-executors.js",
+        "GSD_WORKFLOW_WRITE_GATE_MODULE": "/home/lukas/.gsd/agent/extensions/gsd/bootstrap/write-gate.js",
+        "GSD_PERSIST_WRITE_GATE_STATE": "1",
+        "GSD_WORKFLOW_PROJECT_ROOT": "/opt/AI_projects/Even-g2-gsd-bridge"
+      }
+    },
+    "gsd-browser": {
+      "command": "/home/lukas/.gsd-browser/gsd-browser-lxc.sh",
+      "args": [
+        "mcp",
+        "--session",
+        "gsd-Even-g2-gsd-bridge-769b6c17",
+        "--identity-scope",
+        "project",
+        "--identity-key",
+        "gsd-Even-g2-gsd-bridge-769b6c17",
+        "--identity-project",
+        "gsd-Even-g2-gsd-bridge-769b6c17"
+      ],
+      "cwd": "/opt/AI_projects/Even-g2-gsd-bridge"
+    }
+  }
+}

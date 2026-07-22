@@ -1,0 +1,20 @@
+[Unit]
+Description=Even G2 to GSD-PI bridge (view/steer tmux coding agents from smart glasses)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as the same user that owns ~/.gsd/agent/sessions and the tmux server.
+User=lukas
+WorkingDirectory=/opt/AI_projects/Even-g2-gsd-bridge
+# Token + overrides live here (chmod 600). See .env.example for keys.
+EnvironmentFile=-/opt/AI_projects/Even-g2-gsd-bridge/.env
+ExecStart=/usr/bin/node /opt/AI_projects/Even-g2-gsd-bridge/dist/index.js
+Restart=on-failure
+RestartSec=3
+# tmux control needs the invoking user's session bus; keep default env.
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=default.target
