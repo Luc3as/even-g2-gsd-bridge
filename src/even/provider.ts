@@ -2,7 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Config } from "../config.js";
-import { listProjects, findProject, type Project } from "../gsd/sessions.js";
+import { listProjects, listAttachable, findProject, type Project } from "../gsd/sessions.js";
 import { parseTranscript, deriveStatus, type Status } from "../gsd/jsonl.js";
 import { toGlassesHistory } from "./format.js";
 import * as tmux from "../gsd/tmux.js";
@@ -53,7 +53,7 @@ export function createGsdProvider(cfg: Config) {
   }
 
   async function listSessions(limit: number, _cwd?: string): Promise<SessionInfo[]> {
-    const projects = listProjects(cfg.sessionsDir, cfg.projectRoots);
+    const projects = listAttachable(cfg.sessionsDir, cfg.projectRoots);
     const live = new Set(await tmux.listSessionNames());
     return projects.slice(0, limit).map((p) => ({
       id: p.sessionId,
@@ -102,7 +102,9 @@ export function createGsdProvider(cfg: Config) {
 
   async function getHistory(sessionId: string, limit: number) {
     const p = resolve(sessionId);
-    if (!p || !p.newestJsonl) throw notFound(`Session not found: ${sessionId}`);
+    if (!p) throw notFound(`Session not found: ${sessionId}`);
+    // Cold-start project: no transcript yet, nothing to render until first prompt.
+    if (!p.newestJsonl) return [];
     const { turns } = parseTranscript(readFileSync(p.newestJsonl, "utf8"));
     return toGlassesHistory(turns, limit);
   }

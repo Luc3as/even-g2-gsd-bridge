@@ -135,10 +135,54 @@ export function listProjects(sessionsDir: string, projectRoots: string[]): Proje
   return projects;
 }
 
+/**
+ * Enumerate projects that exist on disk under a root but have never run gsd
+ * (no sessions dir yet), so the glasses can cold-start any project. These carry
+ * a synthetic URL-safe sessionId and no transcript; the first prompt spawns gsd.
+ */
+export function listColdProjects(sessionsDir: string, projectRoots: string[]): Project[] {
+  const sessionedCwds = new Set(listProjects(sessionsDir, projectRoots).map((p) => p.cwd));
+  const cold: Project[] = [];
+  for (const root of projectRoots) {
+    let entries: string[];
+    try {
+      entries = readdirSync(root);
+    } catch {
+      continue; // root missing/unreadable
+    }
+    for (const name of entries) {
+      if (name.startsWith(".")) continue; // hidden dirs are not projects
+      const cwd = join(root, name);
+      if (sessionedCwds.has(cwd)) continue; // already listed as a live/known session
+      try {
+        if (!statSync(cwd).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      cold.push({
+        sessionId: "cold_" + Buffer.from(cwd).toString("base64url"),
+        cwd,
+        name,
+        tmuxName: tmuxNameFor(cwd),
+        newestJsonl: null,
+        mtimeMs: 0,
+        title: name,
+      });
+    }
+  }
+  cold.sort((a, b) => a.name.localeCompare(b.name));
+  return cold;
+}
+
+/** Sessioned projects first (most-recent on top), then cold-start projects. */
+export function listAttachable(sessionsDir: string, projectRoots: string[]): Project[] {
+  return [...listProjects(sessionsDir, projectRoots), ...listColdProjects(sessionsDir, projectRoots)];
+}
+
 export function findProject(
   sessionsDir: string,
   projectRoots: string[],
   sessionId: string,
 ): Project | null {
-  return listProjects(sessionsDir, projectRoots).find((p) => p.sessionId === sessionId) ?? null;
+  return listAttachable(sessionsDir, projectRoots).find((p) => p.sessionId === sessionId) ?? null;
 }

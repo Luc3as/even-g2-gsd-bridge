@@ -26,7 +26,9 @@ export function createRoutes(provider: GsdProvider): Router {
 
   // GET /sessions — resumable/attachable sessions (one per project)
   router.get("/sessions", async (req: Request, res: Response) => {
-    const limit = Number(req.query.limit) || 10;
+    // Default high enough to show every project (sessioned + cold-start) since
+    // the Even App sends no limit; sessioned projects are ordered first.
+    const limit = Number(req.query.limit) || 100;
     try {
       const sessions = await provider.listSessions(limit, req.query.cwd as string | undefined);
       await Promise.all(
