@@ -81,6 +81,11 @@ export function emitText(sessionId: string, text: string, ts?: string): void {
   emit(sessionId, { type: "status", state: "text_start" });
   emit(sessionId, { type: "text_delta", text, ...(ts ? { ts } : {}) });
   emit(sessionId, { type: "status", state: "text_end" });
+  // The reference streams text_delta live, then finalizes the turn with a
+  // `result` frame. The firmware treats the streamed deltas as transient and
+  // commits the persisted message from result.text — without it the answer
+  // flashes and clears on idle. We tail completed jsonl, so ship it in one go.
+  emit(sessionId, { type: "result", success: true, text, provider: "claude", sessionId });
 }
 
 /**
