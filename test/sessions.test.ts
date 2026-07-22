@@ -33,7 +33,7 @@ test("listProjects reads cwd from the session line, not the lossy slug", () => {
     JSON.stringify({ type: "session", cwd: "/opt/AI_projects/Yummy-packing-assistant/.gsd/worktrees/M001" }) + "\n",
   );
 
-  const projects = listProjects(root, ["/opt/AI_projects"]);
+  const projects = listProjects([root], ["/opt/AI_projects"]);
   rmSync(root, { recursive: true, force: true });
 
   assert.equal(projects.length, 1);

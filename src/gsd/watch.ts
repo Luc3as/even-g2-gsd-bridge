@@ -63,7 +63,7 @@ function emitEntry(sessionId: string, line: string): void {
 export function tick(cfg: Config, now: number): void {
   let projects;
   try {
-    projects = listProjects(cfg.sessionsDir, cfg.projectRoots);
+    projects = listProjects(cfg.sessionsDirs, cfg.projectRoots);
   } catch (err) {
     log.error("watch", "listProjects failed", err);
     return;

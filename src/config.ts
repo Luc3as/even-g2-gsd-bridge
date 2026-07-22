@@ -14,8 +14,12 @@ export interface Config {
   bindHost: string;
   /** Bearer token the glasses must present (?token= or Authorization header). */
   token: string;
-  /** Root that holds one gsd-native session dir per project. */
-  sessionsDir: string;
+  /**
+   * Roots that hold one gsd-native session dir per project. gsd writes
+   * interactive TUI sessions to ~/.gsd/sessions and auto-mode/worktree runs to
+   * ~/.gsd/agent/sessions, so both are scanned and merged (newest wins per cwd).
+   */
+  sessionsDirs: string[];
   /** Only projects whose cwd is under one of these roots are exposed. */
   projectRoots: string[];
   /** If a project has no live tmux session, create one and launch gsd on prompt. */
@@ -50,8 +54,10 @@ export function loadConfig(): Config {
     port: parseInt(process.env.PORT ?? "3456", 10),
     bindHost: process.env.BIND_HOST ?? "0.0.0.0",
     token: process.env.BRIDGE_TOKEN ?? randomBytes(16).toString("hex"),
-    sessionsDir:
-      process.env.GSD_SESSIONS_DIR ?? join(home, ".gsd", "agent", "sessions"),
+    sessionsDirs: envList("GSD_SESSIONS_DIR", [
+      join(home, ".gsd", "sessions"),
+      join(home, ".gsd", "agent", "sessions"),
+    ]),
     projectRoots: envList("PROJECT_ROOTS", ["/opt/AI_projects"]),
     allowSpawn: (process.env.ALLOW_SPAWN ?? "true") !== "false",
     spawnCommand: process.env.SPAWN_COMMAND ?? "gsd",

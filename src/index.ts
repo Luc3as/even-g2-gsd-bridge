@@ -37,7 +37,7 @@ app.get("/health", (_req: Request, res: Response) => {
     sseClients: totalClients(),
     lastError: getLastError(),
     bind: `${cfg.bindHost}:${cfg.port}`,
-    sessionsDir: cfg.sessionsDir,
+    sessionsDirs: cfg.sessionsDirs,
     projectRoots: cfg.projectRoots,
   });
 });
@@ -65,7 +65,7 @@ const server = app.listen(cfg.port, cfg.bindHost, () => {
   console.log("  Even G2 ↔ GSD-PI bridge");
   console.log(`  LAN URL   : ${url}`);
   console.log(`  token     : ${cfg.token}`);
-  console.log(`  sessions  : ${cfg.sessionsDir}`);
+  console.log(`  sessions  : ${cfg.sessionsDirs.join(", ")}`);
   console.log(`  projects  : ${cfg.projectRoots.join(", ")}`);
   console.log("  Scan in the Even App (Terminal Mode):");
   console.log("══════════════════════════════════════════════\n");

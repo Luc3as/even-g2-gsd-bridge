@@ -93,46 +93,50 @@ function newestJsonlIn(dir: string): { path: string; mtimeMs: number } | null {
  * configured project roots. cwd is read from each transcript's session line
  * (the slug is lossy and must not be reverse-decoded).
  */
-export function listProjects(sessionsDir: string, projectRoots: string[]): Project[] {
-  if (!existsSync(sessionsDir)) return [];
-  const projects: Project[] = [];
-  for (const slug of readdirSync(sessionsDir)) {
-    const dir = join(sessionsDir, slug);
-    let st;
-    try {
-      st = statSync(dir);
-    } catch {
-      continue;
+export function listProjects(sessionsDirs: string[], projectRoots: string[]): Project[] {
+  // Merge across every session store (interactive ~/.gsd/sessions +
+  // auto-mode ~/.gsd/agent/sessions). A project can appear in both; key by cwd
+  // and keep whichever transcript is newest so live activity always wins.
+  const byCwd = new Map<string, Project>();
+  for (const sessionsDir of sessionsDirs) {
+    if (!existsSync(sessionsDir)) continue;
+    for (const slug of readdirSync(sessionsDir)) {
+      const dir = join(sessionsDir, slug);
+      let st;
+      try {
+        st = statSync(dir);
+      } catch {
+        continue;
+      }
+      if (!st.isDirectory()) continue;
+      const newest = newestJsonlIn(dir);
+      if (!newest) continue;
+      let cwd = "";
+      try {
+        const first = parseLine(readFirstLine(newest.path));
+        if (first?.type === "session") cwd = first.cwd ?? "";
+      } catch {
+        /* skip unreadable */
+      }
+      if (!cwd) continue;
+      // Skip worktree/internal dirs and anything outside the allowed roots.
+      if (!projectRoots.some((root) => cwd === root || cwd.startsWith(root + "/"))) continue;
+      if (cwd.includes("/.gsd/worktrees/") || cwd.includes("/.gsd-worktrees/")) continue;
+      const existing = byCwd.get(cwd);
+      if (existing && existing.mtimeMs >= newest.mtimeMs) continue; // older store loses
+      byCwd.set(cwd, {
+        sessionId: slug,
+        cwd,
+        name: basename(cwd),
+        tmuxName: tmuxNameFor(cwd),
+        newestJsonl: newest.path,
+        mtimeMs: newest.mtimeMs,
+        title: readTitleHint(newest.path) || basename(cwd),
+      });
     }
-    if (!st.isDirectory()) continue;
-    const newest = newestJsonlIn(dir);
-    if (!newest) continue;
-    let cwd = "";
-    let model: string | undefined;
-    try {
-      const first = parseLine(readFirstLine(newest.path));
-      if (first?.type === "session") cwd = first.cwd ?? "";
-    } catch {
-      /* skip unreadable */
-    }
-    if (!cwd) continue;
-    // Skip worktree/internal dirs and anything outside the allowed roots.
-    if (!projectRoots.some((root) => cwd === root || cwd.startsWith(root + "/"))) continue;
-    if (cwd.includes("/.gsd/worktrees/") || cwd.includes("/.gsd-worktrees/")) continue;
-    projects.push({
-      sessionId: slug,
-      cwd,
-      name: basename(cwd),
-      tmuxName: tmuxNameFor(cwd),
-      newestJsonl: newest.path,
-      mtimeMs: newest.mtimeMs,
-      model,
-      title: readTitleHint(newest.path) || basename(cwd),
-    });
   }
   // Most-recently-active first — mirrors sersám's live-on-top feel.
-  projects.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return projects;
+  return [...byCwd.values()].sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
 /**
@@ -140,8 +144,8 @@ export function listProjects(sessionsDir: string, projectRoots: string[]): Proje
  * (no sessions dir yet), so the glasses can cold-start any project. These carry
  * a synthetic URL-safe sessionId and no transcript; the first prompt spawns gsd.
  */
-export function listColdProjects(sessionsDir: string, projectRoots: string[]): Project[] {
-  const sessionedCwds = new Set(listProjects(sessionsDir, projectRoots).map((p) => p.cwd));
+export function listColdProjects(sessionsDirs: string[], projectRoots: string[]): Project[] {
+  const sessionedCwds = new Set(listProjects(sessionsDirs, projectRoots).map((p) => p.cwd));
   const cold: Project[] = [];
   for (const root of projectRoots) {
     let entries: string[];
@@ -179,14 +183,14 @@ export function listColdProjects(sessionsDir: string, projectRoots: string[]): P
 }
 
 /** Sessioned projects first (most-recent on top), then cold-start projects. */
-export function listAttachable(sessionsDir: string, projectRoots: string[]): Project[] {
-  return [...listProjects(sessionsDir, projectRoots), ...listColdProjects(sessionsDir, projectRoots)];
+export function listAttachable(sessionsDirs: string[], projectRoots: string[]): Project[] {
+  return [...listProjects(sessionsDirs, projectRoots), ...listColdProjects(sessionsDirs, projectRoots)];
 }
 
 export function findProject(
-  sessionsDir: string,
+  sessionsDirs: string[],
   projectRoots: string[],
   sessionId: string,
 ): Project | null {
-  return listAttachable(sessionsDir, projectRoots).find((p) => p.sessionId === sessionId) ?? null;
+  return listAttachable(sessionsDirs, projectRoots).find((p) => p.sessionId === sessionId) ?? null;
 }

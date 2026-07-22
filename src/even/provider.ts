@@ -38,7 +38,7 @@ function notFound(msg: string): ProviderError {
 
 export function createGsdProvider(cfg: Config) {
   function resolve(sessionId: string): Project | null {
-    return findProject(cfg.sessionsDir, cfg.projectRoots, sessionId);
+    return findProject(cfg.sessionsDirs, cfg.projectRoots, sessionId);
   }
 
   function statusFor(p: Project): Status {
@@ -53,7 +53,7 @@ export function createGsdProvider(cfg: Config) {
   }
 
   async function listSessions(limit: number, _cwd?: string): Promise<SessionInfo[]> {
-    const projects = listAttachable(cfg.sessionsDir, cfg.projectRoots);
+    const projects = listAttachable(cfg.sessionsDirs, cfg.projectRoots);
     const live = new Set(await tmux.listSessionNames());
     return projects.slice(0, limit).map((p) => ({
       id: p.sessionId,
@@ -88,7 +88,7 @@ export function createGsdProvider(cfg: Config) {
     }
     // Model from the most-recently-active project's transcript.
     let model = "Unknown";
-    const projects = listProjects(cfg.sessionsDir, cfg.projectRoots);
+    const projects = listProjects(cfg.sessionsDirs, cfg.projectRoots);
     if (projects[0]?.newestJsonl) {
       try {
         const { meta } = parseTranscript(readFileSync(projects[0].newestJsonl, "utf8"));
@@ -113,7 +113,7 @@ export function createGsdProvider(cfg: Config) {
     // Resolve target project: by sessionId, else by cwd match (fresh prompt).
     let p = sessionId ? resolve(sessionId) : null;
     if (!p && cwd) {
-      p = listProjects(cfg.sessionsDir, cfg.projectRoots).find((x) => x.cwd === cwd) ?? null;
+      p = listProjects(cfg.sessionsDirs, cfg.projectRoots).find((x) => x.cwd === cwd) ?? null;
     }
     if (!p) throw notFound(`Unknown session/project: ${sessionId ?? cwd ?? "(none)"}`);
 
