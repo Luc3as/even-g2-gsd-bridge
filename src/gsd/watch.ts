@@ -98,8 +98,12 @@ export function tick(cfg: Config, now: number): void {
     }
     if (chunk.data) {
       const lines = chunk.data.split("\n");
-      // Last element may be a partial line; only advance past complete lines.
-      const complete = chunk.data.endsWith("\n") ? lines : lines.slice(0, -1);
+      // split's final element is never a complete line: it's the empty string
+      // when data ends in "\n", or a partial line when it doesn't. Dropping it
+      // in both cases keeps `consumed` byte-exact — counting the trailing "" as
+      // +1 drifted the offset one byte per read, corrupting the next line's
+      // parse so its entry (often an answer) was silently dropped.
+      const complete = lines.slice(0, -1);
       let consumed = 0;
       for (const line of complete) {
         emitEntry(p.sessionId, line);
