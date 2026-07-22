@@ -4,7 +4,7 @@ import { emit, emitText, sessionHasClients, consumeEcho } from "../server/events
 import { parseLine, blocksToText, deriveStatusFromEntries } from "./jsonl.js";
 import { listProjects, type Project } from "./sessions.js";
 import { capturePane } from "./tmux.js";
-import { parsePicker, getPending, setPending, clearPending, renderMenu } from "./questions.js";
+import { parsePicker, getPending, setPending, clearPending, renderMenu, setLastMenu, clearLastMenu } from "./questions.js";
 import { log } from "../log.js";
 
 /**
@@ -37,6 +37,52 @@ function readFrom(path: string, offset: number): { data: string; newOffset: numb
   }
 }
 
+// gsd answers commonly end with a short next-steps menu ("Ďalej?" / "Next steps:"
+// then a numbered list). On the 576x288 lens it blends into the answer body, so
+// insert a rule line above the header to split it off, and prefix each numbered
+// option with `▶` so the choices stand out from body text. Only a header line
+// that is nothing but the keyword triggers it, so a genuine numbered-list answer
+// is left alone. `─` and `▶` are geometric BMP glyphs proven to render on the
+// glasses (color emoji and dingbats tofu-box, see KNOWLEDGE).
+const NEXT_STEPS_HEADER = /^(ďalej|ďalšie|next steps?|next|možnosti|options)\b[?:]?$/i;
+const OPTION_LINE = /^(\s*)(\d+[.)]\s+.+)$/;
+export function markNextSteps(text: string): string {
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 1; i--) {
+    if (NEXT_STEPS_HEADER.test(lines[i]!.trim())) {
+      // Prefix each numbered option below the header with the arrow glyph.
+      for (let j = i + 1; j < lines.length; j++) {
+        const m = lines[j]!.match(OPTION_LINE);
+        if (m) lines[j] = `${m[1]}▶ ${m[2]}`;
+      }
+      lines.splice(i, 0, "─────");
+      return lines.join("\n");
+    }
+  }
+  return text;
+}
+
+// Extract the numbered options of a trailing next-steps menu, or [] if none.
+// Same header rule as markNextSteps; collects the "N. Label" / "N) Label" lines
+// that follow so a bare-number lens reply can be expanded to its full label.
+export function nextStepsOptions(text: string): string[] {
+  const lines = text.split("\n");
+  let hi = -1;
+  for (let i = lines.length - 1; i >= 1; i--) {
+    if (NEXT_STEPS_HEADER.test(lines[i]!.trim())) {
+      hi = i;
+      break;
+    }
+  }
+  if (hi < 0) return [];
+  const opts: string[] = [];
+  for (let i = hi + 1; i < lines.length; i++) {
+    const m = lines[i]!.trim().match(/^(\d+)[.)]\s+(.+)$/);
+    if (m) opts[Number(m[1]) - 1] = m[2]!.trim();
+  }
+  return opts.filter((o) => typeof o === "string" && o.length > 0);
+}
+
 function emitEntry(sessionId: string, line: string): void {
   const e = parseLine(line);
   if (!e) return;
@@ -49,22 +95,27 @@ function emitEntry(sessionId: string, line: string): void {
   const { text, tools } = blocksToText(e.message.content);
   if (!text && tools.length === 0) return;
   if (role === "assistant") {
-    for (const tool of tools) emit(sessionId, { type: "tool_call", text: `> ${tool}`, ts: e.timestamp });
-    // The answer must render as a firmware-known text_delta triad, not an
-    // `agent_message` (a type the glasses drop). See emitText.
-    if (text) emitText(sessionId, text, e.timestamp);
+    // Tool activity is intentionally NOT emitted. The old `tool_call` frame is an
+    // unknown type the firmware drops, and firing it between `busy` and the
+    // answer's `text_start` corrupted the render buffer so the body never
+    // painted. The reference bridge uses `tool_start`/`tool_end`; if per-tool
+    // progress is wanted later, emit those firmware-known frames instead.
+    if (text) {
+      // Cache the trailing menu (if any) so a bare-number lens reply expands to
+      // its full label instead of being re-decided by the model. Overwrite on a
+      // fresh menu, clear when the latest answer has none.
+      const opts = nextStepsOptions(text);
+      if (opts.length) setLastMenu(sessionId, opts);
+      else clearLastMenu(sessionId);
+      emitText(sessionId, markNextSteps(text));
+    }
   } else if (role === "user") {
     // A glasses-sent prompt was already echoed optimistically by provider; skip
     // the jsonl replay of that same line so the wearer doesn't see it twice.
     if (consumeEcho(sessionId, text)) return;
+    // Bare text, matching the reference user_prompt (no icon prefix).
     emit(sessionId, { type: "user_prompt", text, ts: e.timestamp });
   }
-  // toolResult is intentionally NOT emitted. gsd-native logs assistant content as
-  // [toolCall, text] and flushes the toolResult on a SEPARATE line AFTER it, so a
-  // tool_result frame always trails its own answer. On the glasses (latest frame
-  // wins) that raw command dump buries the agent_message answer the wearer needs.
-  // The tool_call summary ("> Bash: …") already gives the progress signal, so the
-  // result dump is pure noise on 576x288 — drop it and let the answer land last.
 }
 
 /**
@@ -122,13 +173,13 @@ export function tick(cfg: Config, now: number): void {
       const st = deriveStatusFromEntries(complete);
       if (st && st !== t.status) {
         t.status = st;
-        emit(p.sessionId, { type: "status", state: st });
+        emit(p.sessionId, { type: "status", state: st, sessionId: p.sessionId });
       }
     }
     // Idle-by-silence: no writes within busy window flips busy→idle.
     if (t.status === "busy" && now - p.mtimeMs > cfg.busyWindowMs) {
       t.status = "idle";
-      emit(p.sessionId, { type: "status", state: "idle" });
+      emit(p.sessionId, { type: "status", state: "idle", sessionId: p.sessionId });
     }
 
     // ANSWER-mode: a gsd picker leaves no jsonl trace, so scrape the live pane.

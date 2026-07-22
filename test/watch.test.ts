@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { tick } from "../src/gsd/watch.ts";
+import { tick, markNextSteps, nextStepsOptions } from "../src/gsd/watch.ts";
 import { getMessages } from "../src/server/events.ts";
 import type { Config } from "../src/config.ts";
 
@@ -73,4 +73,23 @@ test("tick emits an answer written a tick after the prompt (no offset drift)", (
   } finally {
     rmSync(store, { recursive: true, force: true });
   }
+});
+
+test("markNextSteps inserts a rule and prefixes each option with an arrow glyph", () => {
+  const out = markNextSteps("Posledný commit = X.\nĎalej?\n1. Celý reflog\n2. Iné");
+  assert.equal(out, "Posledný commit = X.\n─────\nĎalej?\n▶ 1. Celý reflog\n▶ 2. Iné");
+});
+
+test("markNextSteps leaves a plain numbered answer alone", () => {
+  const txt = "Fakty o Mesiaci:\n1. ~384 400 km\n2. dráha eliptická";
+  assert.equal(markNextSteps(txt), txt);
+});
+
+test("nextStepsOptions parses a trailing menu into labels", () => {
+  const opts = nextStepsOptions("Zhrnutie.\nĎalej?\n1. Obsah 4-SUMMARY.md\n2. Porovnať 1–4\n3. Iné");
+  assert.deepEqual(opts, ["Obsah 4-SUMMARY.md", "Porovnať 1–4", "Iné"]);
+});
+
+test("nextStepsOptions returns [] for a plain numbered answer (no menu header)", () => {
+  assert.deepEqual(nextStepsOptions("Fakty:\n1. ~384 400 km\n2. eliptická"), []);
 });

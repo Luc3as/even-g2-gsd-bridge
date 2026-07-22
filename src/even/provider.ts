@@ -6,7 +6,7 @@ import { listProjects, listAttachable, findProject, type Project } from "../gsd/
 import { parseTranscript, deriveStatus, type Status } from "../gsd/jsonl.js";
 import { toGlassesHistory } from "./format.js";
 import * as tmux from "../gsd/tmux.js";
-import { getPending, clearPending, matchAnswer, matchMulti, renderMenu } from "../gsd/questions.js";
+import { getPending, clearPending, matchAnswer, matchMulti, renderMenu, getLastMenu, clearLastMenu } from "../gsd/questions.js";
 import { emit, emitText, recordEcho } from "../server/events.js";
 import { log } from "../log.js";
 
@@ -152,7 +152,7 @@ export function createGsdProvider(cfg: Config) {
 
     const idx = matchAnswer(q.options, text);
     if (idx == null) {
-      emit(p.sessionId, { type: "agent_message", text: `Didn't catch that.\n${renderMenu(q)}` });
+      emitText(p.sessionId, `Didn't catch that.\n${renderMenu(q)}`);
       return true;
     }
     clearPending(p.sessionId);
@@ -175,6 +175,20 @@ export function createGsdProvider(cfg: Config) {
     // If a picker is open, this utterance is a selection, not a new prompt.
     if (await trySelect(p, text)) {
       return { sessionId: p.sessionId, provider: "claude" as const };
+    }
+
+    // No picker open: a bare-number reply to the last answer's trailing
+    // next-steps menu ("Ďalej?"/"Next steps:") gets expanded to its full label
+    // so the model runs the picked item instead of re-reading its list and
+    // guessing. One-shot — the menu is consumed/cleared on this prompt.
+    const menu = getLastMenu(p.sessionId);
+    clearLastMenu(p.sessionId);
+    if (menu) {
+      const m = text.trim().match(/^(\d+)$/);
+      if (m) {
+        const n = Number(m[1]);
+        if (n >= 1 && n <= menu.length) text = `${n}. ${menu[n - 1]}`;
+      }
     }
 
     const isLive = await tmux.hasSession(p.tmuxName);

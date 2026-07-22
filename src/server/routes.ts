@@ -20,7 +20,16 @@ export function createRoutes(provider: GsdProvider): Router {
       res.status(400).json({ error: "Missing 'sessionId' query parameter" });
       return;
     }
-    const dispose = addClient(sessionId, res, req.query.needReplay === "true");
+    const lastEventId = (req.headers["last-event-id"] as string | undefined) ?? undefined;
+    log.info(
+      "sse",
+      `connect ${sessionId} needReplay=${req.query.needReplay === "true"} lastEventId=${lastEventId ?? "-"}`,
+    );
+    log.debug(
+      "sse",
+      `connect raw ${req.ip} ua="${req.headers["user-agent"] ?? "-"}" query=${JSON.stringify(req.query)}`,
+    );
+    const dispose = addClient(sessionId, res, req.query.needReplay === "true", lastEventId);
     req.on("close", dispose);
   });
 

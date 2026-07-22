@@ -6,7 +6,10 @@ import { join } from "node:path";
  * last-error file so the next agent (or a curl to /health) can diagnose a
  * wedged bridge without a live console.
  */
-type Level = "info" | "warn" | "error";
+type Level = "debug" | "info" | "warn" | "error";
+
+/** Verbose per-frame SSE tracing, gated so it stays off in normal operation. */
+const DEBUG = process.env.DEBUG === "1";
 
 let stateDir = ".state";
 export function setStateDir(dir: string): void {
@@ -39,6 +42,10 @@ function line(level: Level, scope: string, msg: string): void {
 }
 
 export const log = {
+  /** Only emits when DEBUG=1. Use for high-volume per-frame SSE tracing. */
+  debug: (scope: string, msg: string) => {
+    if (DEBUG) line("debug", scope, msg);
+  },
   info: (scope: string, msg: string) => line("info", scope, msg),
   warn: (scope: string, msg: string) => line("warn", scope, msg),
   /** Records an error AND persists it as the durable failure state. */

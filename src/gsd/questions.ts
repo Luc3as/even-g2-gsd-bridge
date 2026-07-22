@@ -42,6 +42,25 @@ export function clearPending(sessionId: string): void {
   pending.delete(sessionId);
 }
 
+// A gsd answer often ends in a trailing next-steps menu ("Ďalej?" / "Next
+// steps:" then a numbered list). That list is plain answer TEXT, not an open
+// picker, so a bare-number reply would otherwise be forwarded verbatim and the
+// model would re-read its own list and re-decide non-deterministically (it
+// picked the wrong item live 2026-07-22). The tailer caches the parsed options
+// here so provider.prompt can expand "2" → "2. <label>" before forwarding,
+// making the choice deterministic. One-shot: cleared on the next prompt.
+const lastMenu = new Map<string, string[]>();
+
+export function getLastMenu(sessionId: string): string[] | undefined {
+  return lastMenu.get(sessionId);
+}
+export function setLastMenu(sessionId: string, options: string[]): void {
+  lastMenu.set(sessionId, options);
+}
+export function clearLastMenu(sessionId: string): void {
+  lastMenu.delete(sessionId);
+}
+
 /**
  * Parse a captured pane into a pending question (single- or multi-select), or
  * null if no picker is open. Discriminator: the picker footer says "esc to
