@@ -4,6 +4,7 @@ import {
   parseTranscript,
   deriveStatus,
   deriveStatusFromEntry,
+  deriveStatusFromEntries,
   summarizeToolCall,
 } from "../src/gsd/jsonl.ts";
 
@@ -71,6 +72,34 @@ test("deriveStatus: pending tool call = busy, final text = idle, stale = idle", 
   assert.equal(deriveStatus(waiting, now, 120000, now), "busy");
   // Old mtime forces idle regardless of content.
   assert.equal(deriveStatus(busy, now - 200000, 120000, now), "idle");
+});
+
+// The live bug: gsd writes the final answer as assistant [toolCall, text],
+// then flushes the toolResult line after it. Deciding off the trailing
+// toolResult wrongly re-flips the finished turn to busy.
+const ASSISTANT_TOOL_THEN_TEXT = JSON.stringify({
+  type: "message",
+  timestamp: "2026-07-22T11:14:48.922Z",
+  message: {
+    role: "assistant",
+    content: [
+      { type: "toolCall", name: "Bash", arguments: { command: "git log -1", description: "latest commit" } },
+      { type: "text", text: "Latest commit: 69959f9 feat: add n8n-PATTERNS.md" },
+    ],
+  },
+});
+
+test("deriveStatusFromEntries decides off last assistant, skipping trailing toolResult", () => {
+  // Answer delivered, result logged after → idle (the bug fix).
+  assert.equal(deriveStatusFromEntries([ASSISTANT_TOOL_THEN_TEXT, TOOL_RESULT]), "idle");
+  // Mid-turn: assistant only called a tool, result back, more coming → busy.
+  assert.equal(deriveStatusFromEntries([ASSISTANT_TOOL, TOOL_RESULT]), "busy");
+  // Just prompted, no assistant yet → busy.
+  assert.equal(deriveStatusFromEntries([USER]), "busy");
+  // Chunk of only a toolResult (assistant came earlier) → undecided, keep prior.
+  assert.equal(deriveStatusFromEntries([TOOL_RESULT]), null);
+  // Plain finished answer → idle.
+  assert.equal(deriveStatusFromEntries([ASSISTANT_DONE]), "idle");
 });
 
 test("deriveStatusFromEntry classifies a single line", () => {

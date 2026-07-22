@@ -138,6 +138,36 @@ export function deriveStatusFromEntry(line: string): Status | null {
 }
 
 /**
+ * Chunk-aware status: scan the just-appended lines newest-first and decide off
+ * the last ASSISTANT message, skipping trailing toolResults. A toolResult alone
+ * is ambiguous — it follows both a mid-turn tool call (busy) and a finished
+ * answer whose result was logged after the text (idle). gsd writes the final
+ * answer as an assistant block sequence ending in text, then flushes the
+ * toolResult line; deciding off that trailing toolResult wrongly re-flips a
+ * completed turn to busy and buries the answer under the "thinking" spinner.
+ * Returns null when the chunk holds no decisive assistant/user entry, so the
+ * caller keeps the prior status (the silence window still clears a real busy).
+ */
+export function deriveStatusFromEntries(lines: string[]): Status | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const e = parseLine(lines[i]!);
+    if (!e || e.type !== "message" || !e.message) continue;
+    const role = e.message.role;
+    if (role === "assistant") {
+      const content = e.message.content;
+      if (Array.isArray(content) && content.length) {
+        const last = content[content.length - 1] as Record<string, unknown>;
+        return last?.type === "toolCall" ? "busy" : "idle";
+      }
+      return "idle";
+    }
+    if (role === "user") return "busy";
+    // toolResult: ambiguous — keep scanning back for the deciding assistant.
+  }
+  return null;
+}
+
+/**
  * Derive live status from the tail of the transcript plus file mtime.
  * "busy" = the agent is mid-turn (last thing is a tool call/result or a very
  * recent assistant chunk) and the file is fresh; otherwise "idle".

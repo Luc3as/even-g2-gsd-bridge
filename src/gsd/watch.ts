@@ -1,7 +1,7 @@
 import { statSync, openSync, readSync, closeSync } from "node:fs";
 import type { Config } from "../config.js";
 import { emit, sessionHasClients, consumeEcho } from "../server/events.js";
-import { parseLine, blocksToText, deriveStatusFromEntry } from "./jsonl.js";
+import { parseLine, blocksToText, deriveStatusFromEntries } from "./jsonl.js";
 import { listProjects, type Project } from "./sessions.js";
 import { capturePane } from "./tmux.js";
 import { parsePicker, getPending, setPending, clearPending, renderMenu } from "./questions.js";
@@ -106,14 +106,13 @@ export function tick(cfg: Config, now: number): void {
         consumed += Buffer.byteLength(line, "utf8") + 1;
       }
       t.offset += consumed;
-      // Status transition detection off the last complete entry.
-      const last = complete[complete.length - 1];
-      if (last) {
-        const st = deriveStatusFromEntry(last);
-        if (st && st !== t.status) {
-          t.status = st;
-          emit(p.sessionId, { type: "status", state: st });
-        }
+      // Status transition detection: decide off the last assistant message in
+      // the chunk, not a trailing toolResult (which gsd logs after the answer
+      // text and would wrongly re-flip a finished turn to busy).
+      const st = deriveStatusFromEntries(complete);
+      if (st && st !== t.status) {
+        t.status = st;
+        emit(p.sessionId, { type: "status", state: st });
       }
     }
     // Idle-by-silence: no writes within busy window flips busy→idle.
