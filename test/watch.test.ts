@@ -93,3 +93,22 @@ test("nextStepsOptions parses a trailing menu into labels", () => {
 test("nextStepsOptions returns [] for a plain numbered answer (no menu header)", () => {
   assert.deepEqual(nextStepsOptions("Fakty:\n1. ~384 400 km\n2. eliptická"), []);
 });
+
+// Structural detection: the model phrases the lead-in freely. A trailing
+// numbered block anchored by a short "Čo?" question line is a menu even though
+// no bare keyword header precedes it (live 2026-07-22 miss).
+const FREEFORM = "Otvorené nite, tvoj výber:\n\n1. Rotovať secrets\n2. Zavrieť gaps\n3. Iné\n\nČo?";
+
+test("detects a free-form menu anchored by a trailing question line", () => {
+  assert.deepEqual(nextStepsOptions(FREEFORM), ["Rotovať secrets", "Zavrieť gaps", "Iné"]);
+  const out = markNextSteps(FREEFORM);
+  assert.equal(
+    out,
+    "─────\nOtvorené nite, tvoj výber:\n\n▶ 1. Rotovať secrets\n▶ 2. Zavrieť gaps\n▶ 3. Iné\n\nČo?",
+  );
+});
+
+test("detects a menu anchored only by an Iné/Other escape option", () => {
+  const txt = "Návrhy:\n1. Prvý krok\n2. Druhý krok\n3. Iné — povedz čo";
+  assert.deepEqual(nextStepsOptions(txt), ["Prvý krok", "Druhý krok", "Iné — povedz čo"]);
+});

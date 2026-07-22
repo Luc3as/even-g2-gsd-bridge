@@ -37,50 +37,94 @@ function readFrom(path: string, offset: number): { data: string; newOffset: numb
   }
 }
 
-// gsd answers commonly end with a short next-steps menu ("Ďalej?" / "Next steps:"
-// then a numbered list). On the 576x288 lens it blends into the answer body, so
-// insert a rule line above the header to split it off, and prefix each numbered
-// option with `▶` so the choices stand out from body text. Only a header line
-// that is nothing but the keyword triggers it, so a genuine numbered-list answer
-// is left alone. `─` and `▶` are geometric BMP glyphs proven to render on the
-// glasses (color emoji and dingbats tofu-box, see KNOWLEDGE).
+// gsd answers commonly end with a short "next-steps" menu the wearer can reply
+// to with a number. The model phrases the lead-in freely ("Ďalej?", "Otvorené
+// nite, tvoj výber:", …), so detection is STRUCTURAL, not keyword-only: a
+// trailing block of ≥2 numbered options qualifies as a menu when ANY of these
+// hold — a bare next-steps keyword sits directly above it, one option is an
+// "Iné"/"Other" escape hatch, or a short question line ("Čo?") trails it. A
+// plain numbered fact-list (moon facts) has none of these, so it is left alone.
+// On the 576x288 lens the menu blends into the answer body, so we insert a rule
+// line above the lead-in and prefix each option with `▶`. `─` and `▶` are
+// geometric BMP glyphs proven to render on the glasses (color emoji and
+// dingbats tofu-box, see KNOWLEDGE).
 const NEXT_STEPS_HEADER = /^(ďalej|ďalšie|next steps?|next|možnosti|options)\b[?:]?$/i;
-const OPTION_LINE = /^(\s*)(\d+[.)]\s+.+)$/;
-export function markNextSteps(text: string): string {
-  const lines = text.split("\n");
-  for (let i = lines.length - 1; i >= 1; i--) {
-    if (NEXT_STEPS_HEADER.test(lines[i]!.trim())) {
-      // Prefix each numbered option below the header with the arrow glyph.
-      for (let j = i + 1; j < lines.length; j++) {
-        const m = lines[j]!.match(OPTION_LINE);
-        if (m) lines[j] = `${m[1]}▶ ${m[2]}`;
-      }
-      lines.splice(i, 0, "─────");
-      return lines.join("\n");
-    }
-  }
-  return text;
+const OPTION_LINE = /^(\s*)(\d+)([.)])\s+(.+)$/;
+const TRAILER_Q = /^.{1,40}\?$/;
+// `\b` is unreliable after the non-ASCII "é" (JS \w is ASCII-only), so anchor
+// the escape-hatch keyword with an explicit end/delimiter class instead.
+const OTHER_OPTION = /^\*{0,2}(iné|other|else)($|[\s—-])/i;
+
+interface Menu {
+  /** Line indices of the contiguous trailing numbered block. */
+  block: number[];
+  /** Line the `─────` rule is inserted above (lead-in, or first option). */
+  leadInIdx: number;
+  /** Option labels, index 0 = option 1. */
+  options: string[];
 }
 
-// Extract the numbered options of a trailing next-steps menu, or [] if none.
-// Same header rule as markNextSteps; collects the "N. Label" / "N) Label" lines
-// that follow so a bare-number lens reply can be expanded to its full label.
-export function nextStepsOptions(text: string): string[] {
+function detectMenu(lines: string[]): Menu | null {
+  const optIdx: number[] = [];
+  for (let i = 0; i < lines.length; i++) if (OPTION_LINE.test(lines[i]!)) optIdx.push(i);
+  if (optIdx.length < 2) return null;
+  // Take the trailing CONTIGUOUS run of numbered lines (a menu is a solid block;
+  // scattered "1." lines across body prose are not).
+  let s = optIdx.length - 1;
+  while (s > 0 && optIdx[s - 1] === optIdx[s]! - 1) s--;
+  const block = optIdx.slice(s);
+  if (block.length < 2) return null;
+  const first = block[0]!;
+  const last = block[block.length - 1]!;
+
+  // Lead-in = nearest non-blank line above the block (header/intro).
+  let lead = first - 1;
+  while (lead >= 0 && lines[lead]!.trim() === "") lead--;
+  const headerQual = lead >= 0 && NEXT_STEPS_HEADER.test(lines[lead]!.trim());
+
+  // Nearest non-blank line below the block = a possible trailing question.
+  let after = last + 1;
+  while (after < lines.length && lines[after]!.trim() === "") after++;
+  const trailerQual = after < lines.length && TRAILER_Q.test(lines[after]!.trim());
+
+  const options: string[] = [];
+  let otherQual = false;
+  for (const i of block) {
+    const m = lines[i]!.match(OPTION_LINE);
+    if (!m) continue;
+    const label = m[4]!.trim();
+    options[Number(m[2]) - 1] = label;
+    if (OTHER_OPTION.test(label)) otherQual = true;
+  }
+  if (!headerQual && !trailerQual && !otherQual) return null;
+
+  return {
+    block,
+    leadInIdx: lead >= 0 ? lead : first,
+    options: options.filter((o) => typeof o === "string" && o.length > 0),
+  };
+}
+
+export function markNextSteps(text: string): string {
   const lines = text.split("\n");
-  let hi = -1;
-  for (let i = lines.length - 1; i >= 1; i--) {
-    if (NEXT_STEPS_HEADER.test(lines[i]!.trim())) {
-      hi = i;
-      break;
-    }
+  const menu = detectMenu(lines);
+  if (!menu) return text;
+  // Prefix each option first, then splice the rule in above the lead-in (splice
+  // shifts indices, so it must come after the block edits).
+  for (const i of menu.block) {
+    const m = lines[i]!.match(OPTION_LINE);
+    if (m) lines[i] = `${m[1]}▶ ${m[2]}${m[3]} ${m[4]}`;
   }
-  if (hi < 0) return [];
-  const opts: string[] = [];
-  for (let i = hi + 1; i < lines.length; i++) {
-    const m = lines[i]!.trim().match(/^(\d+)[.)]\s+(.+)$/);
-    if (m) opts[Number(m[1]) - 1] = m[2]!.trim();
-  }
-  return opts.filter((o) => typeof o === "string" && o.length > 0);
+  lines.splice(menu.leadInIdx, 0, "─────");
+  return lines.join("\n");
+}
+
+// Extract the numbered options of a trailing next-steps menu, or [] if none, so
+// a bare-number lens reply can be expanded to its full label. Same structural
+// detection as markNextSteps.
+export function nextStepsOptions(text: string): string[] {
+  const menu = detectMenu(text.split("\n"));
+  return menu ? menu.options : [];
 }
 
 function emitEntry(sessionId: string, line: string): void {
