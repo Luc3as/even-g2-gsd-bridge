@@ -267,7 +267,13 @@ export function tick(cfg: Config, now: number): void {
     //     and stops the ticker — no faked motion.
     // A pending picker means the turn is blocked on the wearer → force idle (a
     // false busy over a question is why the wearer holds the ring, killing it).
-    const chunkVerdict = complete.length ? deriveStatusFromEntries(complete) : null;
+    // The jsonl derivers are typed Status but provably yield only busy|idle (a
+    // transcript never encodes a pending picker); narrow here since the tailer's
+    // SSE status frame is busy|idle only — "awaiting" is served solely from
+    // statusFor via /api/sessions, never streamed.
+    const chunkVerdict = complete.length
+      ? (deriveStatusFromEntries(complete) as "busy" | "idle" | null)
+      : null;
     const fresh = now - p.mtimeMs <= cfg.busyWindowMs;
     let want: "busy" | "idle" = chunkVerdict ?? (fresh ? "busy" : "idle");
     // A dead auto-run (lock pid gone) will never write again, so its transcript
@@ -404,22 +410,19 @@ function detectQuestion(p: Project): void {
       if (q) {
         if (!had || had.signature !== q.signature) {
           setPending(p.sessionId, q);
-          // Flip the glasses out of "working" the moment the question appears —
-          // the turn is now blocked on the wearer, and statusFor/the tailer both
-          // report idle while a picker is pending. Without this immediate frame
-          // the false busy lingers until the next poll.
+          // Silence the progress ticker locally (it gates on t.status==="busy")
+          // so it stops re-pushing "working" over the question. Do NOT emit a
+          // `state:idle` SSE frame here — that told the App the turn was done and
+          // was the reason every answer became a "quit waiting?" interrupt. The
+          // App now reads "awaiting" from statusFor via its /api/sessions poll,
+          // which is what actually arms its native question mode.
           const t = tails.get(p.sessionId);
-          if (t && t.status !== "idle") {
-            t.status = "idle";
-            emit(p.sessionId, { type: "status", state: "idle", sessionId: p.sessionId });
-          }
-          // Render the option text first (proven to paint on the 576×288 lens),
-          // THEN arm the App's native question mode with a `user_question` frame.
-          // The `user_question` is what flips the App into "awaiting": only then
-          // does the mic answer the question directly (POST /question-response)
-          // instead of being read as an interrupt that first prompts "quit
-          // waiting for agent response?". It ships LAST so it is the final frame
-          // and the App settles into awaiting, not back into a text/result view.
+          if (t) t.status = "idle";
+          // Render the option text (proven to paint on the 576×288 lens), then
+          // send the `user_question` frame as the NOTIFY that mirrors the
+          // reference bridge. The arming happens server-side via statusFor's
+          // "awaiting"; this frame carries the structured options for the App's
+          // native question card.
           emitText(p.sessionId, renderMenu(q));
           emitQuestion(p.sessionId, q.prompt || q.header || "Question", q.options);
           log.info("watch", `question detected ${p.sessionId} (${q.options.length} options)`);

@@ -42,7 +42,12 @@ export interface Turn {
   timestamp?: string;
 }
 
-export type Status = "busy" | "idle";
+// "awaiting" is a bridge-side overlay set only when a picker/permission blocks
+// the turn on the wearer; the reference server returns it from getSessionStatus
+// and the Even App arms its native question mode (mic answers directly, no
+// hold-to-quit gate) off this value. The jsonl derivers never produce it — a
+// transcript can't know a picker is open — so it is layered in at statusFor.
+export type Status = "busy" | "idle" | "awaiting";
 
 interface RawEntry {
   type?: string;

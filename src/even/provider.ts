@@ -62,7 +62,12 @@ export function createGsdProvider(cfg: Config) {
     // whole ~busyWindow while the turn is actually blocked on the wearer's pick.
     // A pending picker means we're waiting on the human, which is idle. Reporting
     // busy here is why the wearer holds the ring, and that ESC kills the turn.
-    if (getPending(p.sessionId)) return "idle";
+    // "awaiting" (not "idle") is what the reference server returns for a pending
+    // question; the Even App polls /api/sessions and arms its native question
+    // mode off this value so the mic answers directly instead of being read as
+    // an interrupt. Returning "idle" here told the App the turn was done, so
+    // every answer became a "quit waiting?" interrupt — the observed lockup.
+    if (getPending(p.sessionId)) return "awaiting";
     // A dead auto-run leaves a fresh transcript mtime but will never write again;
     // freshness alone would report "busy" for the whole busyWindow, so the /status
     // route and the list "working" dot lie about a crashed run. The lock death is
@@ -207,6 +212,11 @@ export function createGsdProvider(cfg: Config) {
       p = listProjects(cfg.sessionsDirs, cfg.projectRoots).find((x) => x.cwd === cwd) ?? null;
     }
     if (!p) throw notFound(`Unknown session/project: ${sessionId ?? cwd ?? "(none)"}`);
+
+    // DIAGNOSTIC: dump every inbound prompt raw + whether a picker is pending, so
+    // a mis-routed picker answer (App posts to /prompt, pending already cleared)
+    // is visible in the journal instead of silently sent to tmux as a fresh line.
+    log.info("provider", `prompt raw=${JSON.stringify(text)} pending=${!!getPending(p.sessionId)}`);
 
     // "status" / "/gsd status" — the wearer's stand-in for running `/gsd status`
     // in the project. Answered from artifacts gsd already writes (STATE.md +
