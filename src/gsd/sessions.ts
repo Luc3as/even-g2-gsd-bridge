@@ -1,6 +1,7 @@
 import { readdirSync, statSync, existsSync, openSync, readSync, closeSync } from "node:fs";
 import { join, basename } from "node:path";
 import { parseLine } from "./jsonl.js";
+import { readProgress, formatProgress } from "./progress.js";
 
 /**
  * A project the bridge can attach to: one gsd sessions dir → one logical
@@ -87,6 +88,13 @@ function readTitleHint(path: string): string {
   return "";
 }
 
+/** Live auto-mode progress as a subtitle, or "" when the project has no active
+ * milestone (or the db is absent/unreadable — best-effort, never throws). */
+function autoProgressSubtitle(cwd: string): string {
+  const p = readProgress(cwd);
+  return p ? formatProgress(p) : "";
+}
+
 function newestJsonlIn(dir: string): { path: string; mtimeMs: number } | null {
   let best: { path: string; mtimeMs: number } | null = null;
   for (const f of readdirSync(dir)) {
@@ -141,7 +149,10 @@ export function listProjects(sessionsDirs: string[], projectRoots: string[]): Pr
         tmuxName: tmuxNameFor(cwd),
         newestJsonl: newest.path,
         mtimeMs: newest.mtimeMs,
-        title: readTitleHint(newest.path) || basename(cwd),
+        // A project mid auto-mode milestone shows live GSD progress as its
+        // subtitle (that is the most relevant "what's happening" for the wearer);
+        // otherwise the latest user prompt. DB read is read-only + best-effort.
+        title: autoProgressSubtitle(cwd) || readTitleHint(newest.path) || basename(cwd),
       });
     }
   }

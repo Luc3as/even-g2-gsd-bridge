@@ -12,12 +12,17 @@ test("tmuxNameFor matches sersám sname (non [A-Za-z0-9_-] → _)", () => {
 });
 
 test("listProjects reads cwd from the session line, not the lossy slug", () => {
+  // Hermetic: the project cwd lives UNDER the temp root and the root is the only
+  // allowed projectRoot, so no real-disk `.gsd/gsd.db` is read (the auto-progress
+  // subtitle reads a project's live db; a real active milestone would otherwise
+  // override the prompt-hint title asserted here).
   const root = mkdtempSync(join(tmpdir(), "gsd-sess-"));
+  const cwd = join(root, "Yummy-packing-assistant");
+  mkdirSync(cwd);
   // Slug hyphens collide with path separators — decode must NOT be attempted.
-  const slug = "--opt-AI_projects-Yummy-packing-assistant--";
+  const slug = "--Yummy-packing-assistant--";
   const dir = join(root, slug);
   mkdirSync(dir);
-  const cwd = "/opt/AI_projects/Yummy-packing-assistant";
   writeFileSync(
     join(dir, "2026-07-22T08-11-30-967Z_abc.jsonl"),
     JSON.stringify({ type: "session", id: "abc", cwd, timestamp: "2026-07-22T08:11:30.967Z" }) +
@@ -26,14 +31,14 @@ test("listProjects reads cwd from the session line, not the lossy slug", () => {
       "\n",
   );
   // A worktree dir must be filtered out.
-  const wt = join(root, "--opt-AI_projects-Yummy-.gsd-worktrees-M001--");
+  const wt = join(root, "--Yummy-.gsd-worktrees-M001--");
   mkdirSync(wt);
   writeFileSync(
     join(wt, "x.jsonl"),
-    JSON.stringify({ type: "session", cwd: "/opt/AI_projects/Yummy-packing-assistant/.gsd/worktrees/M001" }) + "\n",
+    JSON.stringify({ type: "session", cwd: join(cwd, ".gsd/worktrees/M001") }) + "\n",
   );
 
-  const projects = listProjects([root], ["/opt/AI_projects"]);
+  const projects = listProjects([root], [root]);
   rmSync(root, { recursive: true, force: true });
 
   assert.equal(projects.length, 1);
@@ -45,10 +50,13 @@ test("listProjects reads cwd from the session line, not the lossy slug", () => {
 });
 
 test("listProjects title tracks the LATEST user prompt, not the first", () => {
+  // Hermetic: cwd under the temp root (see the cwd-from-session-line test) so the
+  // auto-progress subtitle finds no real db and the prompt-hint title is asserted.
   const root = mkdtempSync(join(tmpdir(), "gsd-sess-"));
-  const dir = join(root, "--opt-AI_projects-Even-g2-gsd-bridge--");
+  const cwd = join(root, "Even-g2-gsd-bridge");
+  mkdirSync(cwd);
+  const dir = join(root, "--Even-g2-gsd-bridge--");
   mkdirSync(dir);
-  const cwd = "/opt/AI_projects/Even-g2-gsd-bridge";
   const msg = (role: string, text: string) =>
     JSON.stringify({ type: "message", message: { role, content: [{ type: "text", text }] } });
   writeFileSync(
@@ -62,7 +70,7 @@ test("listProjects title tracks the LATEST user prompt, not the first", () => {
     ].join("\n") + "\n",
   );
 
-  const projects = listProjects([root], ["/opt/AI_projects"]);
+  const projects = listProjects([root], [root]);
   rmSync(root, { recursive: true, force: true });
 
   assert.equal(projects[0]!.title, "latest command");

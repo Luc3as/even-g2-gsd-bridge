@@ -5,6 +5,7 @@ import { parseLine, blocksToText, deriveStatusFromEntries } from "./jsonl.js";
 import { listProjects, type Project } from "./sessions.js";
 import { capturePane } from "./tmux.js";
 import { parsePicker, getPending, setPending, clearPending, renderMenu, setLastMenu, clearLastMenu } from "./questions.js";
+import { readProgress, formatProgressRich, progressSignature } from "./progress.js";
 import { log } from "../log.js";
 
 /**
@@ -22,6 +23,10 @@ interface TailState {
 }
 
 const tails = new Map<string, TailState>();
+
+// Last progress signature pushed per session, so the live GSD-progress line is
+// emitted only when slice/task counts actually advance — not every tick.
+const lastProgress = new Map<string, string>();
 
 function readFrom(path: string, offset: number): { data: string; newOffset: number } {
   const st = statSync(path);
@@ -228,8 +233,31 @@ export function tick(cfg: Config, now: number): void {
 
     // ANSWER-mode: a gsd picker leaves no jsonl trace, so scrape the live pane.
     // Only meaningful when glasses are attached to answer it.
-    if (sessionHasClients(p.sessionId)) detectQuestion(p);
+    if (sessionHasClients(p.sessionId)) {
+      detectQuestion(p);
+      detectProgress(p);
+    }
   }
+}
+
+/**
+ * Push a live GSD auto-mode progress line to the lens when the milestone's
+ * slice/task counts advance. Read-only DB read (see progress.ts); silent when
+ * the project has no active milestone. Deduped on the count signature so a
+ * stalled milestone doesn't repaint every tick. Only called with clients
+ * attached, so a disconnected session accrues no state.
+ */
+function detectProgress(p: Project): void {
+  const prog = readProgress(p.cwd);
+  if (!prog) {
+    lastProgress.delete(p.sessionId);
+    return;
+  }
+  const sig = progressSignature(prog);
+  if (lastProgress.get(p.sessionId) === sig) return;
+  lastProgress.set(p.sessionId, sig);
+  emitText(p.sessionId, formatProgressRich(prog));
+  log.info("watch", `progress → ${p.sessionId} (${sig})`);
 }
 
 /**
