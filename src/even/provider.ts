@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Config } from "../config.js";
@@ -53,8 +53,15 @@ export function createGsdProvider(cfg: Config) {
     if (!p.newestJsonl) return "idle";
     try {
       const raw = readFileSync(p.newestJsonl, "utf8");
-      const mtime = statSync(p.newestJsonl).mtimeMs;
-      return deriveStatus(raw, mtime, cfg.busyWindowMs, Date.now());
+      // Freshness floor uses p.mtimeMs — the newest transcript across ALL of this
+      // project's stores — not this one file's mtime. gsd-native rotates a file
+      // per turn while the Claude-Code run streams continuously, so a single
+      // file's mtime lags >busyWindow mid-run and deriveStatus would false-idle
+      // the "working" dot. The content verdict still comes from the tailed file
+      // (last meaningful entry); freshness only gates the idle-by-silence floor,
+      // mirroring the tailer's freshness gate (see watch.ts). A real >busyWindow
+      // stall (nothing written anywhere) still resolves idle.
+      return deriveStatus(raw, p.mtimeMs, cfg.busyWindowMs, Date.now());
     } catch {
       return "idle";
     }
