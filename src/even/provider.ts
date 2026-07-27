@@ -181,11 +181,6 @@ export function createGsdProvider(cfg: Config) {
   async function trySelect(p: Project, text: string): Promise<boolean> {
     const q = getPending(p.sessionId);
     if (!q) return false;
-    // Log the raw utterance + the options it's matched against, so a failed
-    // match (dictation spelling letters, JSON-wrapped, odd encoding) is
-    // diagnosable from the journal instead of a silent re-prompt loop.
-    log.info("provider", `trySelect raw=${JSON.stringify(text)} multi=${q.multi} options=${JSON.stringify(q.options)}`);
-
     // The Even App answers a question by POSTing a JSON object keyed by the
     // question text with the picked option LABEL as the value (mirrors the
     // reference bridge's `JSON.parse(answer)` in session.js:handleAskUserQuestion).
@@ -247,11 +242,6 @@ export function createGsdProvider(cfg: Config) {
       p = listProjects(cfg.sessionsDirs, cfg.projectRoots).find((x) => x.cwd === cwd) ?? null;
     }
     if (!p) throw notFound(`Unknown session/project: ${sessionId ?? cwd ?? "(none)"}`);
-
-    // DIAGNOSTIC: dump every inbound prompt raw + whether a picker is pending, so
-    // a mis-routed picker answer (App posts to /prompt, pending already cleared)
-    // is visible in the journal instead of silently sent to tmux as a fresh line.
-    log.info("provider", `prompt raw=${JSON.stringify(text)} pending=${!!getPending(p.sessionId)}`);
 
     // "status" / "/gsd status" — the wearer's stand-in for running `/gsd status`
     // in the project. Answered from artifacts gsd already writes (STATE.md +
