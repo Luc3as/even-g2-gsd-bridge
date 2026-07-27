@@ -161,6 +161,50 @@ test("tick asserts busy from mtime freshness when no decisive chunk is read", ()
   }
 });
 
+// A crash just stops jsonl writes, so status lapses to idle — the wearer can't
+// tell "died" from "finished". The alarm reads gsd's own liveness (auto.lock pid)
+// and pushes a loud AUTO-STOPPED line ONCE, on the running→stopped transition.
+// The project cwd must be a real dir here (unlike the fake-cwd tests above) so its
+// .gsd/auto.lock is readable — so the store lives INSIDE the project root.
+test("tick alarms once when an auto-run's lock pid goes dead", () => {
+  const root = mkdtempSync(join(tmpdir(), "watch-alarm-root-"));
+  try {
+    const cwd = join(root, "crashy-proj");
+    mkdirSync(join(cwd, ".gsd"), { recursive: true });
+    const store = join(root, "store");
+    const dir = join(store, "--aslug--");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "x.jsonl");
+    writeFileSync(file, SESSION(cwd) + "\n" + ASSISTANT("mid-run answer") + "\n");
+    const cfg = { sessionsDirs: [store], projectRoots: [root], busyWindowMs: 120000, tailIntervalMs: 500 } as Config;
+
+    let now = Date.now();
+    // Lock held by a live pid (this process) → running. Baseline, no alarm.
+    writeFileSync(join(cwd, ".gsd", "auto.lock"), JSON.stringify({ pid: process.pid, unitType: "run-uat", unitId: "M013/S02" }));
+    tick(cfg, now); // first sight → adopts "running" baseline silently
+    now += 500;
+
+    let alarms = getMessages("--aslug--", 0).filter(
+      (m) => m.type === "text_delta" && String((m as { text?: string }).text).includes("AUTO-STOPPED"),
+    );
+    assert.equal(alarms.length, 0, "must not alarm while the run is live");
+
+    // The run dies: lock now names a dead pid. Transition running→stopped fires.
+    writeFileSync(join(cwd, ".gsd", "auto.lock"), JSON.stringify({ pid: 2147483647, unitType: "run-uat", unitId: "M013/S02" }));
+    tick(cfg, now);
+    now += 500;
+    tick(cfg, now); // second tick over the same dead lock must NOT re-alarm
+
+    alarms = getMessages("--aslug--", 0).filter(
+      (m) => m.type === "text_delta" && String((m as { text?: string }).text).includes("AUTO-STOPPED"),
+    );
+    assert.equal(alarms.length, 1, "AUTO-STOPPED must fire exactly once on the death transition");
+    assert.ok(String((alarms[0] as { text?: string }).text).includes("M013/S02"), "alarm carries the unit id");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("markNextSteps inserts a rule and prefixes each option with an arrow glyph", () => {
   const out = markNextSteps("Posledný commit = X.\nĎalej?\n1. Celý reflog\n2. Iné");
   assert.equal(out, "Posledný commit = X.\n─────\nĎalej?\n▶ 1. Celý reflog\n▶ 2. Iné");

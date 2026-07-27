@@ -6,6 +6,7 @@ import { listProjects, type Project } from "./sessions.js";
 import { capturePane } from "./tmux.js";
 import { parsePicker, getPending, setPending, clearPending, renderMenu, setLastMenu, clearLastMenu } from "./questions.js";
 import { readProgress, formatProgressRich, progressSignature } from "./progress.js";
+import { readAutoState, latestSeriousNotification, type AutoLiveness } from "./auto.js";
 
 // While a task/slice runs (busy) but no count has completed, re-push the progress
 // line this often with a growing bridge-side elapsed ticker, so the wearer sees
@@ -38,6 +39,18 @@ interface ProgressState {
   lastPushMs: number;
 }
 const lastProgress = new Map<string, ProgressState>();
+
+// Per-session alarm dedup so a crash/stop or failure notification fires ONCE, not
+// every tick. `liveness` remembers the last-seen auto-run state so we alarm only
+// on the transition INTO "stopped" (a dead lock lingers, so a level check would
+// re-alarm forever). `notifId` remembers the last serious notification pushed so
+// a new failure (different id) alarms while the same one stays quiet — gsd leaves
+// `read:false` even on consumed entries, so id-dedup is the only reliable gate.
+interface AlarmState {
+  liveness: AutoLiveness;
+  notifId: string | null;
+}
+const lastAlarm = new Map<string, AlarmState>();
 
 function readFrom(path: string, offset: number): { data: string; newOffset: number } {
   const st = statSync(path);
@@ -192,6 +205,15 @@ export function tick(cfg: Config, now: number): void {
   }
   for (const p of projects) {
     if (!p.newestJsonl) continue;
+
+    // Auto-mode failure alarm FIRST, before the tail's first-sight/rotation
+    // `continue` below — else a bridge start (or a per-turn file rotation, which
+    // gsd-native does constantly) would skip the alarm exactly on the tick a crash
+    // becomes visible. Runs for EVERY project, client attached or not: a crash
+    // while the glasses are dark must still hit the ring so a reconnect surfaces
+    // it (emit no-ops the live broadcast but always fills the ring).
+    detectAutoAlarm(p);
+
     // Tail EVERY project, even with no SSE client attached, so the message ring
     // keeps a rolling backlog. Otherwise any jsonl written while the glasses are
     // disconnected (e.g. SSE dropped mid-turn) is skipped here AND never enters
@@ -261,6 +283,60 @@ export function tick(cfg: Config, now: number): void {
       detectProgress(p, t.status, now);
     }
   }
+}
+
+/**
+ * Surface a stopped/failed auto-run to the glasses as a loud one-line alarm. The
+ * jsonl tailer alone can't do this: a crash just stops writes, so status lapses
+ * to idle — indistinguishable from a clean finish, which is why the wearer misses
+ * failures. Reads gsd's own liveness (auto.lock pid) + failure channel
+ * (notifications.jsonl) and pushes on two edges, each deduped so it fires once:
+ *   1. Auto-run death — the lock's pid went dead mid-unit (transition into
+ *      "stopped"). A dead lock lingers, so we alarm only on the running→stopped
+ *      edge, not every tick.
+ *   2. New serious notification — an error, or a pause/halt/blocker warning, with
+ *      an id we haven't pushed yet (gsd never flips `read`, so id is the gate).
+ */
+function detectAutoAlarm(p: Project): void {
+  const auto = readAutoState(p.cwd);
+  const notif = latestSeriousNotification(p.cwd);
+  const prev = lastAlarm.get(p.sessionId) ?? { liveness: auto.liveness, notifId: null };
+
+  // First sight of this project: adopt current state as baseline WITHOUT
+  // alarming, so a bridge restart doesn't re-fire every historical failure. Only
+  // transitions observed live from here on alarm.
+  const firstSight = !lastAlarm.has(p.sessionId);
+  if (firstSight) {
+    lastAlarm.set(p.sessionId, { liveness: auto.liveness, notifId: notif?.id ?? null });
+    return;
+  }
+
+  let alarmed = false;
+
+  if (auto.liveness === "stopped" && prev.liveness !== "stopped") {
+    const unit = auto.unitId ? ` ${auto.unitId}` : "";
+    const reason = notif && notif.id !== prev.notifId ? ` — ${clip(notif.message, 60)}` : "";
+    emitText(p.sessionId, `⚠ AUTO-STOPPED${unit}${reason}`);
+    log.warn("watch", `auto-stopped alarm → ${p.sessionId} (unit=${auto.unitId ?? "-"} pid=${auto.pid ?? "-"})`);
+    alarmed = true;
+    // Fold the notif into this alarm so the notif branch below doesn't double-fire
+    // the same reason line.
+    prev.notifId = notif?.id ?? prev.notifId;
+  }
+
+  if (!alarmed && notif && notif.id !== prev.notifId) {
+    const tag = notif.severity === "error" ? "⚠ ERROR" : "⚠";
+    emitText(p.sessionId, `${tag}: ${clip(notif.message, 72)}`);
+    log.warn("watch", `notif alarm → ${p.sessionId} (${notif.severity} ${notif.id})`);
+  }
+
+  lastAlarm.set(p.sessionId, { liveness: auto.liveness, notifId: notif?.id ?? prev.notifId });
+}
+
+/** Trim a message to one lens line, collapsing whitespace/newlines. */
+function clip(s: string, max: number): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > max ? t.slice(0, max - 1) + "…" : t;
 }
 
 /**

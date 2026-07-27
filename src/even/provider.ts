@@ -8,9 +8,21 @@ import { toGlassesHistory } from "./format.js";
 import * as tmux from "../gsd/tmux.js";
 import { getPending, clearPending, matchAnswer, matchMulti, renderMenu, getLastMenu, clearLastMenu } from "../gsd/questions.js";
 import { emit, emitText, recordEcho } from "../server/events.js";
+import { buildStatusCard } from "../gsd/status.js";
 import { log } from "../log.js";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * True when a glasses utterance is the wearer asking for project status: bare
+ * "status", "/status", "/gsd status", or "gsd status" (dictation drops the slash
+ * and may sentence-case, so match loosely and case-insensitively). Kept narrow so
+ * an ordinary prompt that merely contains the word "status" still routes to gsd.
+ */
+function isStatusCommand(text: string): boolean {
+  const t = text.trim().toLowerCase().replace(/[.?!…]+$/, "");
+  return t === "status" || t === "/status" || t === "gsd status" || t === "/gsd status";
+}
 
 /**
  * The GSD even-terminal provider. Implements the exact 9-method surface the
@@ -185,6 +197,17 @@ export function createGsdProvider(cfg: Config) {
       p = listProjects(cfg.sessionsDirs, cfg.projectRoots).find((x) => x.cwd === cwd) ?? null;
     }
     if (!p) throw notFound(`Unknown session/project: ${sessionId ?? cwd ?? "(none)"}`);
+
+    // "status" / "/gsd status" — the wearer's stand-in for running `/gsd status`
+    // in the project. Answered from artifacts gsd already writes (STATE.md +
+    // progress db + auto.lock), so it is instant, needs no live tmux session, and
+    // never spawns one. Only when no picker is pending (else "status" would be
+    // mis-read as a menu answer). Recognized before the tmux/spawn path below.
+    if (!getPending(p.sessionId) && isStatusCommand(text)) {
+      emitText(p.sessionId, buildStatusCard(p.cwd, p.name));
+      log.info("provider", `status card → ${p.sessionId}`);
+      return { sessionId: p.sessionId, provider: "claude" as const };
+    }
 
     // If a picker is open, this utterance is a selection, not a new prompt.
     if (await trySelect(p, text)) {
