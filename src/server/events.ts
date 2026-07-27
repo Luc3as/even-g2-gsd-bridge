@@ -126,6 +126,37 @@ export function emitText(sessionId: string, text: string): void {
 }
 
 /**
+ * Emit a `user_question` frame the way the Even App arms its native question UI.
+ * This is what the reference bridge sends when an agent asks a question (see
+ * even-terminal/dist/claude/session.js: handleAskUserQuestion). The App keys its
+ * "awaiting" mode off this frame — only then does the mic answer the question
+ * DIRECTLY (POST /question-response) instead of being read as an interrupt that
+ * prompts "quit waiting for agent response?". Without it the wearer sees the
+ * option text but the App still thinks a turn is in-flight, so answering needs a
+ * hold-to-quit first. One question, options as {label}; header/description empty
+ * (our picker carries only labels). toolUseId is synthetic (the answer routes by
+ * sessionId, not toolUseId, in our tmux-backed responder).
+ */
+export function emitQuestion(
+  sessionId: string,
+  question: string,
+  options: string[],
+): void {
+  emit(sessionId, {
+    type: "user_question",
+    questions: [
+      {
+        question,
+        header: "",
+        options: options.map((label) => ({ label, description: "", preview: "" })),
+      },
+    ],
+    toolUseId: `bridge-${sessionId}`,
+    sessionId,
+  });
+}
+
+/**
  * Optimistic-echo dedupe. provider echoes a glasses-sent prompt instantly (so
  * the wearer sees their own words with no lag); seconds later the jsonl tailer
  * reads the same user line gsd wrote and would emit it again. provider records

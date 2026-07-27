@@ -1,6 +1,6 @@
 import { statSync, openSync, readSync, closeSync } from "node:fs";
 import type { Config } from "../config.js";
-import { emit, emitText, sessionHasClients, consumeEcho } from "../server/events.js";
+import { emit, emitText, emitQuestion, sessionHasClients, consumeEcho } from "../server/events.js";
 import { parseLine, blocksToText, deriveStatusFromEntries } from "./jsonl.js";
 import { listProjects, type Project } from "./sessions.js";
 import { capturePane } from "./tmux.js";
@@ -413,7 +413,15 @@ function detectQuestion(p: Project): void {
             t.status = "idle";
             emit(p.sessionId, { type: "status", state: "idle", sessionId: p.sessionId });
           }
+          // Render the option text first (proven to paint on the 576×288 lens),
+          // THEN arm the App's native question mode with a `user_question` frame.
+          // The `user_question` is what flips the App into "awaiting": only then
+          // does the mic answer the question directly (POST /question-response)
+          // instead of being read as an interrupt that first prompts "quit
+          // waiting for agent response?". It ships LAST so it is the final frame
+          // and the App settles into awaiting, not back into a text/result view.
           emitText(p.sessionId, renderMenu(q));
+          emitQuestion(p.sessionId, q.prompt || q.header || "Question", q.options);
           log.info("watch", `question detected ${p.sessionId} (${q.options.length} options)`);
         }
       } else if (had) {

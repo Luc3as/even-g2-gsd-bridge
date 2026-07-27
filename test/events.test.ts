@@ -74,3 +74,28 @@ test("reconnect replays only the dark-window gap", () => {
   dispose2();
   dispose3();
 });
+
+// The App arms its native question UI ("awaiting" mode, where the mic answers
+// the question directly instead of being read as an interrupt) off a
+// `user_question` frame. emitQuestion must ship exactly that shape: one question,
+// options as {label,description,preview}, carrying sessionId + a toolUseId.
+test("emitQuestion ships a user_question frame that arms the App's awaiting mode", async () => {
+  const { emitQuestion } = await import("../src/server/events.ts");
+  const sid = "q-frame-probe";
+  const c = fakeRes();
+  const dispose = addClient(sid, c.res, false);
+  emitQuestion(sid, "Pick a fruit", ["Apple", "Pear"]);
+  const got = frames(c.writes).map((f) => f.msg);
+  const uq = got.find((m) => m.type === "user_question")!;
+  assert.ok(uq, "a user_question frame must be emitted");
+  assert.equal(uq.sessionId, sid, "frame must carry sessionId (App keys awaiting off it)");
+  const qs = uq.questions as Array<Record<string, unknown>>;
+  assert.equal(qs.length, 1, "one question");
+  assert.equal(qs[0]!.question, "Pick a fruit");
+  assert.deepEqual(
+    (qs[0]!.options as Array<Record<string, unknown>>).map((o) => o.label),
+    ["Apple", "Pear"],
+    "options carried as {label} in order",
+  );
+  dispose();
+});
