@@ -12,8 +12,17 @@
  *                       content block .type ∈ toolCall | text | thinking
  *                       toolCall = {name, arguments, externalResult:{content:[{text}]}}
  *
- * This is NOT the Claude-Code / claude-agent-sdk format, so the official
- * even-terminal claude provider's reader does not apply.
+ * gsd-pi ALSO writes live auto-mode runs in Claude-Code format under
+ * ~/.claude/projects/<slug>/<uuid>.jsonl (a different dir + shape). Verified
+ * shape (2026-07-27, live Yummy-packing-assistant run):
+ *   meta lines        {type:"queue-operation"|"summary"|"last-prompt", ...}  (no cwd)
+ *   turn              {type:"assistant"|"user", cwd, message:{role, content:[...]}}
+ *                       content block .type ∈ text | tool_use | tool_result | thinking
+ *                       tool_use    = {name, input}
+ *                       tool_result = {tool_use_id, content} (lives on a user entry)
+ * parseLine normalizes Claude-Code entries into the gsd-native RawEntry shape
+ * (type:"message", message.role, blocks toolCall/text) so every downstream reader
+ * (deriveStatus*, blocksToText, parseTranscript) works on one canonical shape.
  */
 
 export interface SessionMeta {
@@ -50,11 +59,46 @@ interface RawEntry {
 export function parseLine(line: string): RawEntry | null {
   const t = line.trim();
   if (!t) return null;
+  let raw: Record<string, unknown>;
   try {
-    return JSON.parse(t) as RawEntry;
+    raw = JSON.parse(t) as Record<string, unknown>;
   } catch {
     return null;
   }
+  // Claude-Code format: top-level type is the role ("assistant"/"user") and the
+  // Anthropic content blocks differ (tool_use/.input, tool_result). Normalize to
+  // the gsd-native RawEntry shape so all downstream readers stay format-agnostic.
+  if ((raw.type === "assistant" || raw.type === "user") && raw.message && typeof raw.message === "object") {
+    return normalizeClaudeCode(raw);
+  }
+  return raw as RawEntry;
+}
+
+/**
+ * Map a Claude-Code assistant/user entry onto the gsd-native RawEntry shape:
+ * type:"message", message.role from the top-level type, content blocks rewritten
+ * to toolCall/text (tool_use→toolCall with .arguments, tool_result kept so a
+ * mid-turn user tool_result still reads as busy). Top-level cwd is lifted so
+ * session discovery can read it (CC has no {type:"session"} line).
+ */
+function normalizeClaudeCode(raw: Record<string, unknown>): RawEntry {
+  const role = raw.type as string; // "assistant" | "user"
+  const msg = raw.message as { content?: unknown };
+  const blocks = Array.isArray(msg.content) ? msg.content : [];
+  const content = blocks.map((b) => {
+    if (!b || typeof b !== "object") return b;
+    const block = b as Record<string, unknown>;
+    if (block.type === "tool_use") {
+      return { type: "toolCall", name: block.name, arguments: block.input ?? {} };
+    }
+    return block; // text/thinking/tool_result pass through (blocksToText handles them)
+  });
+  return {
+    type: "message",
+    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : undefined,
+    cwd: typeof raw.cwd === "string" ? raw.cwd : undefined,
+    message: { role, content },
+  };
 }
 
 export function blocksToText(content: unknown): { text: string; tools: string[] } {

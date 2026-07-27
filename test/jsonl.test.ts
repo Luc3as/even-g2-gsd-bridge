@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  parseLine,
   parseTranscript,
   deriveStatus,
   deriveStatusFromEntry,
@@ -113,4 +114,69 @@ test("parseTranscript tolerates blank + malformed lines", () => {
   const raw = [SESSION, "", "{not json", USER].join("\n");
   const { turns } = parseTranscript(raw);
   assert.equal(turns.length, 1);
+});
+
+// ── Claude-Code format ────────────────────────────────────────────────────────
+// gsd-pi writes live auto-mode runs under ~/.claude/projects in Claude-Code
+// shape (2026-07-27). parseLine normalizes these onto the gsd-native RawEntry
+// shape so every downstream reader is format-agnostic.
+const CC_META = JSON.stringify({ type: "queue-operation", operation: "x", sessionId: "b2cbe36a" });
+const CC_USER = JSON.stringify({
+  type: "user",
+  cwd: "/opt/AI_projects/Yummy-packing-assistant",
+  timestamp: "2026-07-27T12:09:16.750Z",
+  message: { role: "user", content: [{ type: "text", text: "continue the slice" }] },
+});
+const CC_ASSISTANT_TEXT = JSON.stringify({
+  type: "assistant",
+  cwd: "/opt/AI_projects/Yummy-packing-assistant",
+  message: { role: "assistant", content: [{ type: "text", text: "Reading the artifacts." }] },
+});
+const CC_ASSISTANT_TOOL = JSON.stringify({
+  type: "assistant",
+  cwd: "/opt/AI_projects/Yummy-packing-assistant",
+  message: {
+    role: "assistant",
+    content: [{ type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "/opt/x/S02-PLAN.md" } }],
+  },
+});
+const CC_TOOL_RESULT = JSON.stringify({
+  type: "user",
+  cwd: "/opt/AI_projects/Yummy-packing-assistant",
+  message: { role: "user", content: [{ tool_use_id: "toolu_1", type: "tool_result", content: "file body" }] },
+});
+
+test("parseLine normalizes Claude-Code entries onto the gsd-native shape", () => {
+  const e = parseLine(CC_ASSISTANT_TOOL);
+  assert.equal(e?.type, "message");
+  assert.equal(e?.cwd, "/opt/AI_projects/Yummy-packing-assistant"); // top-level cwd lifted
+  const block = (e!.message!.content as any[])[0];
+  assert.equal(block.type, "toolCall"); // tool_use → toolCall
+  assert.equal(block.name, "Read");
+  assert.deepEqual(block.arguments, { file_path: "/opt/x/S02-PLAN.md" }); // input → arguments
+  // Meta lines pass through untouched (no message → not a turn).
+  assert.equal(parseLine(CC_META)?.type, "queue-operation");
+});
+
+test("deriveStatus works on a Claude-Code chunk (tool_use=busy, text=idle)", () => {
+  // A CC turn is one entry per block: a tool_use assistant entry is mid-work,
+  // a trailing text assistant entry is the finished answer.
+  assert.equal(deriveStatusFromEntry(CC_ASSISTANT_TOOL), "busy");
+  assert.equal(deriveStatusFromEntry(CC_ASSISTANT_TEXT), "idle");
+  // CC tool_result is a user-role entry → mid-turn busy.
+  assert.equal(deriveStatusFromEntry(CC_TOOL_RESULT), "busy");
+  // End of turn: answer text is the last entry → idle even after a tool_result.
+  assert.equal(deriveStatusFromEntries([CC_ASSISTANT_TOOL, CC_TOOL_RESULT, CC_ASSISTANT_TEXT]), "idle");
+  // Mid-turn: last entry is a tool_result, work continues → busy.
+  assert.equal(deriveStatusFromEntries([CC_ASSISTANT_TOOL, CC_TOOL_RESULT]), "busy");
+});
+
+test("parseTranscript reads a Claude-Code transcript (meta lines carry no cwd)", () => {
+  const raw = [CC_META, CC_USER, CC_ASSISTANT_TOOL, CC_ASSISTANT_TEXT].join("\n");
+  const { turns } = parseTranscript(raw);
+  // user prompt + tool-call assistant + text assistant (meta line dropped).
+  assert.equal(turns.length, 3);
+  assert.equal(turns[0]!.role, "user");
+  assert.deepEqual(turns[1]!.tools, ["Read: /opt/x/S02-PLAN.md"]);
+  assert.equal(turns[2]!.text, "Reading the artifacts.");
 });

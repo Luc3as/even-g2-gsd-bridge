@@ -15,9 +15,11 @@ export interface Config {
   /** Bearer token the glasses must present (?token= or Authorization header). */
   token: string;
   /**
-   * Roots that hold one gsd-native session dir per project. gsd writes
-   * interactive TUI sessions to ~/.gsd/sessions and auto-mode/worktree runs to
-   * ~/.gsd/agent/sessions, so both are scanned and merged (newest wins per cwd).
+   * Roots that hold one session dir per project. gsd writes interactive TUI
+   * sessions to ~/.gsd/sessions and (older) auto-mode runs to ~/.gsd/agent/sessions;
+   * current gsd-pi auto-mode writes live runs in Claude-Code format under
+   * ~/.claude/projects. All are scanned and merged (newest wins per cwd), and
+   * parseLine normalizes the Claude-Code shape, so the live run is picked up.
    */
   sessionsDirs: string[];
   /** Only projects whose cwd is under one of these roots are exposed. */
@@ -57,6 +59,7 @@ export function loadConfig(): Config {
     sessionsDirs: envList("GSD_SESSIONS_DIR", [
       join(home, ".gsd", "sessions"),
       join(home, ".gsd", "agent", "sessions"),
+      join(home, ".claude", "projects"),
     ]),
     projectRoots: envList("PROJECT_ROOTS", ["/opt/AI_projects"]),
     allowSpawn: (process.env.ALLOW_SPAWN ?? "true") !== "false",

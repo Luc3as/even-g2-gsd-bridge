@@ -29,18 +29,35 @@ export function tmuxNameFor(cwd: string): string {
   return basename(cwd).replace(/[^A-Za-z0-9_-]/g, "_");
 }
 
-/** Read just the first line of a file cheaply (session meta lives there). */
-function readFirstLine(path: string, max = 4096): string {
-  const fd = openSync(path, "r");
+/**
+ * Read a transcript's project cwd. gsd-native carries it on the {type:"session"}
+ * first line; Claude-Code has no session line and leads with meta entries
+ * (queue-operation/summary) that lack cwd, then message entries that carry it.
+ * So scan a head window for the first entry exposing cwd — parseLine lifts CC's
+ * top-level cwd onto the normalized RawEntry, so one read serves both formats.
+ * Returns "" if none found (unreadable/foreign file → project skipped upstream).
+ */
+function readCwd(path: string, max = 16384): string {
+  let head: string;
   try {
-    const buf = Buffer.alloc(max);
-    const n = readSync(fd, buf, 0, max, 0);
-    const s = buf.subarray(0, n).toString("utf8");
-    const nl = s.indexOf("\n");
-    return nl >= 0 ? s.slice(0, nl) : s;
-  } finally {
-    closeSync(fd);
+    const fd = openSync(path, "r");
+    try {
+      const buf = Buffer.alloc(max);
+      const n = readSync(fd, buf, 0, max, 0);
+      head = buf.subarray(0, n).toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return "";
   }
+  // Drop the last split element: it may be a partial line at the window edge.
+  const lines = head.split("\n").slice(0, -1);
+  for (const line of lines) {
+    const e = parseLine(line);
+    if (e?.cwd) return e.cwd;
+  }
+  return "";
 }
 
 /**
@@ -129,13 +146,7 @@ export function listProjects(sessionsDirs: string[], projectRoots: string[]): Pr
       if (!st.isDirectory()) continue;
       const newest = newestJsonlIn(dir);
       if (!newest) continue;
-      let cwd = "";
-      try {
-        const first = parseLine(readFirstLine(newest.path));
-        if (first?.type === "session") cwd = first.cwd ?? "";
-      } catch {
-        /* skip unreadable */
-      }
+      const cwd = readCwd(newest.path);
       if (!cwd) continue;
       // Skip worktree/internal dirs and anything outside the allowed roots.
       if (!projectRoots.some((root) => cwd === root || cwd.startsWith(root + "/"))) continue;
