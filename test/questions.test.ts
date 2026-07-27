@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePicker, matchAnswer, matchMulti, renderMenu } from "../src/gsd/questions.ts";
+import { parsePicker, matchAnswer, matchMulti, renderMenu, markAnswered, wasAnswered, clearAnswered } from "../src/gsd/questions.ts";
 
 // Real capture shape (2026-07-22 live): box borders "│", left-panel bleed
 // before the left border, "› " highlight marker, a client-appended
@@ -130,6 +130,17 @@ test("matchAnswer fuzzy-matches labels", () => {
   assert.equal(matchAnswer(opts, "yes"), 1);
   assert.equal(matchAnswer(opts, "clarify"), 2);
   assert.equal(matchAnswer(opts, "banana"), null);
+});
+
+test("answered-signature guard suppresses a re-detect of the same picker", () => {
+  const sid = "sess-guard-1";
+  const sig = "s|Deploy|Deploy now?|Yes|No";
+  assert.equal(wasAnswered(sid, sig), false);
+  markAnswered(sid, sig);
+  assert.equal(wasAnswered(sid, sig), true); // same signature → suppressed
+  assert.equal(wasAnswered(sid, "s|Other|Other?|A|B"), false); // different picker still arms
+  clearAnswered(sid); // pane cleared → same question later re-arms
+  assert.equal(wasAnswered(sid, sig), false);
 });
 
 test("renderMenu is compact and numbered", () => {

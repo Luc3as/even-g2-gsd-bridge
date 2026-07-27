@@ -42,6 +42,27 @@ export function clearPending(sessionId: string): void {
   pending.delete(sessionId);
 }
 
+// After a selection is sent, the picker stays painted on the tmux pane for a
+// beat (send-keys lag + the TUI's own redraw before it advances). The 500ms
+// tailer re-scrapes that stale pane, sees the same picker, and — since the
+// answered question was already cleared from `pending` — re-arms it, so the
+// App answers the same question again and again (observed live: one "Option 1"
+// looped ~15 selects). We record the just-answered signature here; detectQuestion
+// refuses to re-arm it until the pane changes to a genuinely different question
+// or the picker clears. Cleared on pane-clear so the SAME question asked again
+// later still arms.
+const answered = new Map<string, string>();
+
+export function markAnswered(sessionId: string, signature: string): void {
+  answered.set(sessionId, signature);
+}
+export function wasAnswered(sessionId: string, signature: string): boolean {
+  return answered.get(sessionId) === signature;
+}
+export function clearAnswered(sessionId: string): void {
+  answered.delete(sessionId);
+}
+
 // A gsd answer often ends in a trailing next-steps menu ("Ďalej?" / "Next
 // steps:" then a numbered list). That list is plain answer TEXT, not an open
 // picker, so a bare-number reply would otherwise be forwarded verbatim and the

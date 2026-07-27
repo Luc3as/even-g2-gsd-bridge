@@ -4,7 +4,7 @@ import { emit, emitText, emitQuestion, sessionHasClients, consumeEcho } from "..
 import { parseLine, blocksToText, deriveStatusFromEntries } from "./jsonl.js";
 import { listProjects, type Project } from "./sessions.js";
 import { capturePane } from "./tmux.js";
-import { parsePicker, getPending, setPending, clearPending, renderMenu, setLastMenu, clearLastMenu } from "./questions.js";
+import { parsePicker, getPending, setPending, clearPending, renderMenu, setLastMenu, clearLastMenu, wasAnswered, clearAnswered } from "./questions.js";
 import { readProgress, formatProgressRich, progressSignature } from "./progress.js";
 import { readAutoState, latestSeriousNotification, type AutoLiveness } from "./auto.js";
 
@@ -408,6 +408,12 @@ function detectQuestion(p: Project): void {
       const q = parsePicker(pane);
       const had = getPending(p.sessionId);
       if (q) {
+        // A just-answered picker lingers on the pane for a beat after the digit
+        // is sent; without this guard the tailer re-arms it (pending was cleared
+        // on the match) and the App answers the same question repeatedly. Skip
+        // re-arming a signature we already answered — it clears when the pane
+        // moves on to a different picker or empties (else branch below).
+        if (wasAnswered(p.sessionId, q.signature)) return;
         if (!had || had.signature !== q.signature) {
           setPending(p.sessionId, q);
           // Silence the progress ticker locally (it gates on t.status==="busy")
@@ -427,8 +433,12 @@ function detectQuestion(p: Project): void {
           emitQuestion(p.sessionId, q.prompt || q.header || "Question", q.options);
           log.info("watch", `question detected ${p.sessionId} (${q.options.length} options)`);
         }
-      } else if (had) {
-        clearPending(p.sessionId);
+      } else {
+        // Pane no longer shows a picker: the turn moved on. Clear both the
+        // pending question and the answered-signature guard so the same question
+        // asked again later re-arms cleanly.
+        if (had) clearPending(p.sessionId);
+        clearAnswered(p.sessionId);
       }
     })
     .catch((err) => log.error("watch", `question detect failed ${p.sessionId}`, err));

@@ -6,7 +6,7 @@ import { listProjects, listAttachable, findProject, type Project } from "../gsd/
 import { parseTranscript, deriveStatus, type Status } from "../gsd/jsonl.js";
 import { toGlassesHistory } from "./format.js";
 import * as tmux from "../gsd/tmux.js";
-import { getPending, clearPending, matchAnswer, matchMulti, renderMenu, getLastMenu, clearLastMenu } from "../gsd/questions.js";
+import { getPending, clearPending, markAnswered, matchAnswer, matchMulti, renderMenu, getLastMenu, clearLastMenu } from "../gsd/questions.js";
 import { emit, emitText, recordEcho } from "../server/events.js";
 import { buildStatusCard } from "../gsd/status.js";
 import { readAutoState } from "../gsd/auto.js";
@@ -200,6 +200,9 @@ export function createGsdProvider(cfg: Config) {
         return true;
       }
       clearPending(p.sessionId);
+      // Suppress re-arm of this same picker while it lingers on the pane after
+      // the keys are sent (else the tailer re-detects and the App re-answers).
+      markAnswered(p.sessionId, q.signature);
       // Cursor starts on the first option; walk down to each pick in ascending
       // order (Down× the gap), toggle with Space, then submit through review.
       const keys: string[] = [];
@@ -226,6 +229,9 @@ export function createGsdProvider(cfg: Config) {
       return true;
     }
     clearPending(p.sessionId);
+    // Suppress re-arm of this same picker while it lingers on the pane after the
+    // digit is sent (else the tailer re-detects and the App re-answers).
+    markAnswered(p.sessionId, q.signature);
     await tmux.sendKeys(p.tmuxName, [String(idx)]);
     await new Promise((r) => setTimeout(r, 200));
     await tmux.sendKeys(p.tmuxName, ["Enter"]);
