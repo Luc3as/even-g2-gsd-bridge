@@ -116,6 +116,19 @@ function clip(s: string, max = 40): string {
 }
 
 /**
+ * Bridge-side wall-clock elapsed since the current count-state was first seen,
+ * as `+2m14s` / `+45s`. This is honest motion the bridge CAN produce: it is not
+ * the auto-run's real task start (which the bridge, a foreign db reader, cannot
+ * see) but the age of the current slice/task snapshot on the wire — enough to
+ * show the wearer that work is live and not stalled between completions.
+ */
+export function fmtElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `+${s}s`;
+  return `+${Math.floor(s / 60)}m${s % 60}s`;
+}
+
+/**
  * Richer multi-line progress for the live SSE stream (full-width text frame, not
  * the length-capped list subtitle). Adds the active slice + task titles so the
  * wearer sees WHAT auto-mode is on, not just counts. Elapsed/ETA are deliberately
@@ -123,13 +136,19 @@ function clip(s: string, max = 40): string {
  * — a foreign reader of the db — cannot see, and `created_at` is plan time, not
  * run start, so surfacing it would mislead.
  *   "M011 ▶ S01 · 0/4 slices\nShared layout & routes scaffold\nT1/2 · Scaffold routes"
+ *   "M011 ▶ S01 · 0/4 slices · +2m14s\n…"   (elapsedMs given — live ticker)
  *   "M013 ✓ 4/4 slices — milestone finishing"
+ *
+ * `elapsedMs`, when >0, appends a bridge-side elapsed ticker to the count line so
+ * a re-push during a long-running task visibly moves even when counts are static
+ * (see fmtElapsed). Omit it for the initial push on a count change.
  */
-export function formatProgressRich(p: Progress): string {
+export function formatProgressRich(p: Progress, elapsedMs = 0): string {
   if (!p.activeSliceId) {
     return `${p.milestoneId} ✓ ${p.slicesDone}/${p.slicesTotal} slices — milestone finishing`;
   }
-  const lines = [`${p.milestoneId} ▶ ${p.activeSliceId} · ${p.slicesDone}/${p.slicesTotal} slices`];
+  const tick = elapsedMs > 0 ? ` · ${fmtElapsed(elapsedMs)}` : "";
+  const lines = [`${p.milestoneId} ▶ ${p.activeSliceId} · ${p.slicesDone}/${p.slicesTotal} slices${tick}`];
   if (p.activeSliceTitle) lines.push(clip(p.activeSliceTitle));
   if (p.tasksTotal > 0) {
     const taskLine = `T${p.tasksDone}/${p.tasksTotal}`;
@@ -144,5 +163,5 @@ export function formatProgressRich(p: Progress): string {
  * tick). Milestone id included so a milestone rollover always emits.
  */
 export function progressSignature(p: Progress): string {
-  return `${p.milestoneId}:${p.slicesDone}/${p.slicesTotal}:${p.activeSliceId ?? "-"}:${p.tasksDone}/${p.tasksTotal}`;
+  return `${p.milestoneId}:${p.slicesDone}/${p.slicesTotal}:${p.activeSliceId ?? "-"}:${p.tasksDone}/${p.tasksTotal}:${p.activeTaskId ?? "-"}`;
 }

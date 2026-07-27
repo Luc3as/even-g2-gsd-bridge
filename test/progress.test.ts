@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readProgress, formatProgress, formatProgressRich, progressSignature } from "../src/gsd/progress.ts";
+import { readProgress, formatProgress, formatProgressRich, fmtElapsed, progressSignature } from "../src/gsd/progress.ts";
 
 // Build a minimal .gsd/gsd.db under a temp cwd matching the live schema
 // (milestones/slices/tasks; slices/tasks carry a title column). Returns the cwd.
@@ -178,6 +178,31 @@ test("formatProgressRich: long title clipped to lens width", () => {
   assert.ok(titleLine.endsWith("…"));
 });
 
+test("fmtElapsed: sub-minute → seconds, over a minute → Nm Ns", () => {
+  assert.equal(fmtElapsed(0), "+0s");
+  assert.equal(fmtElapsed(45_000), "+45s");
+  assert.equal(fmtElapsed(59_999), "+59s");
+  assert.equal(fmtElapsed(60_000), "+1m0s");
+  assert.equal(fmtElapsed(134_000), "+2m14s");
+});
+
+test("formatProgressRich: elapsedMs appends live ticker to the count line", () => {
+  const p = { milestoneId: "M011", slicesDone: 0, slicesTotal: 4, activeSliceId: "S01", activeSliceTitle: "Shared layout", tasksDone: 0, tasksTotal: 2, activeTaskId: "T01", activeTaskTitle: "Scaffold" };
+  assert.equal(
+    formatProgressRich(p, 134_000),
+    "M011 ▶ S01 · 0/4 slices · +2m14s\nShared layout\nT0/2 · Scaffold",
+  );
+  // elapsedMs=0 (the default / initial push) carries no ticker.
+  assert.equal(formatProgressRich(p, 0).split("\n")[0], "M011 ▶ S01 · 0/4 slices");
+});
+
+test("formatProgressRich: finishing form ignores elapsedMs (no ticker over idle)", () => {
+  assert.equal(
+    formatProgressRich({ milestoneId: "M013", slicesDone: 4, slicesTotal: 4, activeSliceId: null, activeSliceTitle: null, tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null }, 99_000),
+    "M013 ✓ 4/4 slices — milestone finishing",
+  );
+});
+
 test("progressSignature changes only when counts/slice/milestone change", () => {
   const base = { milestoneId: "M001", slicesDone: 1, slicesTotal: 4, activeSliceId: "S02", activeSliceTitle: "x", tasksDone: 1, tasksTotal: 3, activeTaskId: "T02", activeTaskTitle: "y" };
   assert.equal(progressSignature(base), progressSignature({ ...base }));
@@ -185,4 +210,7 @@ test("progressSignature changes only when counts/slice/milestone change", () => 
   assert.notEqual(progressSignature(base), progressSignature({ ...base, slicesDone: 2 }));
   assert.notEqual(progressSignature(base), progressSignature({ ...base, activeSliceId: "S03" }));
   assert.notEqual(progressSignature(base), progressSignature({ ...base, milestoneId: "M002" }));
+  // Active task shift (e.g. gsd replans tasks so a new one is active at the same
+  // done-count) must still push, so the wearer sees the unit-in-flight change.
+  assert.notEqual(progressSignature(base), progressSignature({ ...base, activeTaskId: "T03" }));
 });

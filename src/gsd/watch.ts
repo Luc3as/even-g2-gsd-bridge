@@ -6,6 +6,11 @@ import { listProjects, type Project } from "./sessions.js";
 import { capturePane } from "./tmux.js";
 import { parsePicker, getPending, setPending, clearPending, renderMenu, setLastMenu, clearLastMenu } from "./questions.js";
 import { readProgress, formatProgressRich, progressSignature } from "./progress.js";
+
+// While a task/slice runs (busy) but no count has completed, re-push the progress
+// line this often with a growing bridge-side elapsed ticker, so the wearer sees
+// live motion instead of a frozen count between completions.
+const PROGRESS_TICK_MS = 15_000;
 import { log } from "../log.js";
 
 /**
@@ -24,9 +29,15 @@ interface TailState {
 
 const tails = new Map<string, TailState>();
 
-// Last progress signature pushed per session, so the live GSD-progress line is
-// emitted only when slice/task counts actually advance — not every tick.
-const lastProgress = new Map<string, string>();
+// Per-session progress push state. `sig` dedups on count change; `seenMs` stamps
+// when the current count-state was first observed (elapsed base); `lastPushMs`
+// throttles the busy-mode elapsed re-push to PROGRESS_TICK_MS.
+interface ProgressState {
+  sig: string;
+  seenMs: number;
+  lastPushMs: number;
+}
+const lastProgress = new Map<string, ProgressState>();
 
 function readFrom(path: string, offset: number): { data: string; newOffset: number } {
   const st = statSync(path);
@@ -239,29 +250,46 @@ export function tick(cfg: Config, now: number): void {
     // Only meaningful when glasses are attached to answer it.
     if (sessionHasClients(p.sessionId)) {
       detectQuestion(p);
-      detectProgress(p);
+      detectProgress(p, t.status, now);
     }
   }
 }
 
 /**
- * Push a live GSD auto-mode progress line to the lens when the milestone's
- * slice/task counts advance. Read-only DB read (see progress.ts); silent when
- * the project has no active milestone. Deduped on the count signature so a
- * stalled milestone doesn't repaint every tick. Only called with clients
- * attached, so a disconnected session accrues no state.
+ * Push a live GSD auto-mode progress line to the lens. Read-only DB read (see
+ * progress.ts); silent when the project has no active milestone. Only called with
+ * clients attached, so a disconnected session accrues no state.
+ *
+ * Two triggers:
+ *  1. Count change — a slice/task completed (or milestone rolled over): push the
+ *     fresh line, reset the elapsed clock.
+ *  2. Busy elapsed tick — same counts, but auto-mode is mid-task (busy) and the
+ *     current state has been on-screen ≥ PROGRESS_TICK_MS: re-push with a growing
+ *     `+Nm Ns` ticker so the wearer sees the run is alive, not stalled. Idle
+ *     sessions never tick — a frozen line over idle is correct.
  */
-function detectProgress(p: Project): void {
+function detectProgress(p: Project, status: "busy" | "idle", now: number): void {
   const prog = readProgress(p.cwd);
   if (!prog) {
     lastProgress.delete(p.sessionId);
     return;
   }
   const sig = progressSignature(prog);
-  if (lastProgress.get(p.sessionId) === sig) return;
-  lastProgress.set(p.sessionId, sig);
-  emitText(p.sessionId, formatProgressRich(prog));
-  log.info("watch", `progress → ${p.sessionId} (${sig})`);
+  const prev = lastProgress.get(p.sessionId);
+
+  if (!prev || prev.sig !== sig) {
+    lastProgress.set(p.sessionId, { sig, seenMs: now, lastPushMs: now });
+    emitText(p.sessionId, formatProgressRich(prog));
+    log.info("watch", `progress → ${p.sessionId} (${sig})`);
+    return;
+  }
+
+  // Same counts. Only re-push while busy and only every PROGRESS_TICK_MS, with the
+  // elapsed ticker so the repaint carries visibly new text (not an identical line).
+  if (status !== "busy" || now - prev.lastPushMs < PROGRESS_TICK_MS) return;
+  prev.lastPushMs = now;
+  emitText(p.sessionId, formatProgressRich(prog, now - prev.seenMs));
+  log.info("watch", `progress tick → ${p.sessionId} (${sig} +${Math.round((now - prev.seenMs) / 1000)}s)`);
 }
 
 /**
