@@ -43,6 +43,13 @@ export function createGsdProvider(cfg: Config) {
   }
 
   function statusFor(p: Project): Status {
+    // An open gsd picker flushes NO jsonl, so the transcript's last entry is the
+    // toolCall/user that triggered it and the file mtime is still fresh —
+    // deriveStatus would return "busy" and the glasses show "working" for the
+    // whole ~busyWindow while the turn is actually blocked on the wearer's pick.
+    // A pending picker means we're waiting on the human, which is idle. Reporting
+    // busy here is why the wearer holds the ring, and that ESC kills the turn.
+    if (getPending(p.sessionId)) return "idle";
     if (!p.newestJsonl) return "idle";
     try {
       const raw = readFileSync(p.newestJsonl, "utf8");

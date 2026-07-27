@@ -76,6 +76,14 @@ export function createRoutes(provider: GsdProvider): Router {
   router.post("/prompt", async (req: Request, res: Response) => {
     const { text, sessionId, cwd } = req.body ?? {};
     if (!text || typeof text !== "string") {
+      // Client posted an empty/non-string prompt (e.g. dictation inserting a
+      // bare newline instead of firing a real send). Log it so a dropped
+      // prompt is a fact in the journal, not indistinguishable from "never
+      // arrived" — see P2 dictation-not-submitted investigation.
+      log.warn(
+        "route",
+        `prompt rejected: missing/empty text (sessionId=${sessionId ?? "-"} type=${typeof text})`,
+      );
       res.status(400).json({ error: "Missing 'text' field" });
       return;
     }

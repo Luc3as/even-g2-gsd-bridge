@@ -220,7 +220,11 @@ export function tick(cfg: Config, now: number): void {
       // the chunk, not a trailing toolResult (which gsd logs after the answer
       // text and would wrongly re-flip a finished turn to busy).
       const st = deriveStatusFromEntries(complete);
-      if (st && st !== t.status) {
+      // A pending picker means the turn is blocked on the wearer, not working.
+      // The last jsonl entry is the toolCall that opened it, so deriveStatus says
+      // "busy"; suppress that flip so the glasses don't show "working" over a
+      // question (that false busy is why the wearer holds the ring, killing it).
+      if (st && st !== t.status && !(st === "busy" && getPending(p.sessionId))) {
         t.status = st;
         emit(p.sessionId, { type: "status", state: st, sessionId: p.sessionId });
       }
@@ -274,6 +278,15 @@ function detectQuestion(p: Project): void {
       if (q) {
         if (!had || had.signature !== q.signature) {
           setPending(p.sessionId, q);
+          // Flip the glasses out of "working" the moment the question appears —
+          // the turn is now blocked on the wearer, and statusFor/the tailer both
+          // report idle while a picker is pending. Without this immediate frame
+          // the false busy lingers until the next poll.
+          const t = tails.get(p.sessionId);
+          if (t && t.status !== "idle") {
+            t.status = "idle";
+            emit(p.sessionId, { type: "status", state: "idle", sessionId: p.sessionId });
+          }
           emitText(p.sessionId, renderMenu(q));
           log.info("watch", `question detected ${p.sessionId} (${q.options.length} options)`);
         }

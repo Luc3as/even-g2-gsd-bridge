@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tick, markNextSteps, nextStepsOptions } from "../src/gsd/watch.ts";
 import { getMessages } from "../src/server/events.ts";
+import { setPending, clearPending } from "../src/gsd/questions.ts";
 import type { Config } from "../src/config.ts";
 
 const SESSION = (cwd: string) =>
@@ -71,6 +72,52 @@ test("tick emits an answer written a tick after the prompt (no offset drift)", (
     const endIdx = msgs.findIndex((m) => m.type === "status" && (m as { state?: string }).state === "text_end");
     assert.ok(startIdx >= 0 && startIdx < deltaIdx && deltaIdx < endIdx, "text_delta not bracketed by text_start/text_end");
   } finally {
+    rmSync(store, { recursive: true, force: true });
+  }
+});
+
+// Regression: while a gsd picker is open, the transcript's last entry is the
+// toolCall that opened it and the file mtime is fresh, so the tailer would emit
+// a "busy" status and the glasses show "working" over the question. That false
+// busy is why the wearer holds the ring, whose ESC then kills the turn. With a
+// pending picker the turn is blocked on the human → the busy flip is suppressed.
+const TOOLCALL = () =>
+  JSON.stringify({
+    type: "message",
+    message: { role: "assistant", content: [{ type: "toolCall", name: "ask_user_questions", arguments: {} }] },
+  });
+
+test("tick suppresses the busy status flip while a picker is pending", () => {
+  const store = mkdtempSync(join(tmpdir(), "watch-pending-"));
+  try {
+    const cwd = "/opt/AI_projects/pending-probe";
+    const dir = join(store, "--pslug--");
+    mkdirSync(dir);
+    const file = join(dir, "x.jsonl");
+    writeFileSync(file, SESSION(cwd) + "\n" + ASSISTANT("older answer") + "\n");
+    const cfg = cfgFor(store);
+
+    let now = 2_000_000;
+    tick(cfg, now); // first sight → offset = EOF, status idle
+    now += 500;
+
+    // The turn opens a picker: gsd flushes the toolCall line, then nothing more.
+    setPending("--pslug--", {
+      header: "Fruit",
+      prompt: "Pick",
+      options: ["a", "b"],
+      multi: false,
+      signature: "s|Fruit|Pick|a|b",
+    });
+    appendFileSync(file, TOOLCALL() + "\n");
+    tick(cfg, now); // toolCall would be "busy" — but a picker is pending
+
+    const busy = getMessages("--pslug--", 0).filter(
+      (m) => m.type === "status" && (m as { state?: string }).state === "busy",
+    );
+    assert.equal(busy.length, 0, "must not flip to busy while a picker is pending");
+  } finally {
+    clearPending("--pslug--");
     rmSync(store, { recursive: true, force: true });
   }
 });
