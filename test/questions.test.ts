@@ -115,6 +115,16 @@ test("matchAnswer maps number words", () => {
   assert.equal(matchAnswer(opts, "third one"), 3);
 });
 
+test("matchAnswer finds a number word past the leading token", () => {
+  // Dictation wraps the number ("option one", "number two", "choice 2").
+  const opts = ["Apple", "Banana", "Cherry"];
+  assert.equal(matchAnswer(opts, "option one"), 1);
+  assert.equal(matchAnswer(opts, "number two"), 2);
+  assert.equal(matchAnswer(opts, "choice 2"), 2);
+  assert.equal(matchAnswer(opts, "the third one"), 3);
+  assert.equal(matchAnswer(opts, "option four"), null); // out of range
+});
+
 test("matchAnswer fuzzy-matches labels", () => {
   const opts = ["Yes, you got it", "Not quite - let me clarify"];
   assert.equal(matchAnswer(opts, "yes"), 1);

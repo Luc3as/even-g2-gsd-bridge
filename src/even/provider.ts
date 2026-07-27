@@ -154,6 +154,10 @@ export function createGsdProvider(cfg: Config) {
   async function trySelect(p: Project, text: string): Promise<boolean> {
     const q = getPending(p.sessionId);
     if (!q) return false;
+    // Log the raw utterance + the options it's matched against, so a failed
+    // match (dictation spelling letters, JSON-wrapped, odd encoding) is
+    // diagnosable from the journal instead of a silent re-prompt loop.
+    log.info("provider", `trySelect raw=${JSON.stringify(text)} multi=${q.multi} options=${JSON.stringify(q.options)}`);
 
     if (q.multi) {
       const picks = matchMulti(q.options, text);

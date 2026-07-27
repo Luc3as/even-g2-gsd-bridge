@@ -159,8 +159,16 @@ export function matchAnswer(options: string[], utterance: string): number | null
     return n >= 1 && n <= options.length ? n : null;
   }
 
-  const firstWord = u.split(/\s+/)[0]!;
-  if (NUM_WORDS[firstWord] && NUM_WORDS[firstWord]! <= options.length) return NUM_WORDS[firstWord]!;
+  // Dictation rarely gives a bare number — it wraps it ("option one", "number
+  // two", "the third one", "choice 2"). Scan every word for the first digit or
+  // number-word, not just the leading token, and take that as the index.
+  for (const w of u.split(/\s+/)) {
+    if (/^\d+$/.test(w)) {
+      const n = Number(w);
+      if (n >= 1 && n <= options.length) return n;
+    }
+    if (NUM_WORDS[w] && NUM_WORDS[w]! <= options.length) return NUM_WORDS[w]!;
+  }
 
   const labels = options.map((o) => o.toLowerCase());
   const exact = labels.indexOf(u);

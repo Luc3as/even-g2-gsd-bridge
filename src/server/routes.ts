@@ -115,6 +115,9 @@ export function createRoutes(provider: GsdProvider): Router {
   // POST /question-response
   router.post("/question-response", (req: Request, res: Response) => {
     const { sessionId, answer } = req.body ?? {};
+    // Log the RAW answer the App posts so the dictation shape (spelled letters,
+    // JSON-wrapped, index, or label) is auditable — the parse fix depends on it.
+    log.info("route", `question-response raw answer=${JSON.stringify(answer)} (sessionId=${sessionId ?? "-"})`);
     if (!sessionId) {
       res.status(400).json({ error: "Missing 'sessionId'" });
       return;
