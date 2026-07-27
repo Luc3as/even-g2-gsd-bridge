@@ -26,6 +26,28 @@ function isStatusCommand(text: string): boolean {
 }
 
 /**
+ * The Even App answers a question by POSTing a JSON object keyed by the question
+ * text with the picked option label(s) as values, e.g. {"Pick a fruit":"Apple"}
+ * (this mirrors the reference bridge's own `JSON.parse(answer)`; see
+ * even-terminal session.js:handleAskUserQuestion). Extract the answer string(s)
+ * so the matcher sees "Apple", not the whole blob. String values join with a
+ * space (a multi-select answer may arrive as an array or several keys). A bare
+ * dictation string that isn't JSON returns unchanged.
+ */
+export function unwrapAnswer(text: string): string {
+  const t = text.trim();
+  if (!t.startsWith("{") && !t.startsWith("[")) return text;
+  try {
+    const parsed = JSON.parse(t);
+    const vals = Array.isArray(parsed) ? parsed : Object.values(parsed);
+    const flat = vals.flat().filter((v) => typeof v === "string");
+    return flat.length ? flat.join(" ") : text;
+  } catch {
+    return text;
+  }
+}
+
+/**
  * The GSD even-terminal provider. Implements the exact 9-method surface the
  * official @evenrealities/even-terminal routes consume, but split by concern:
  *   READ  (listSessions/getHistory/status)  → gsd-native jsonl transcripts
@@ -164,8 +186,15 @@ export function createGsdProvider(cfg: Config) {
     // diagnosable from the journal instead of a silent re-prompt loop.
     log.info("provider", `trySelect raw=${JSON.stringify(text)} multi=${q.multi} options=${JSON.stringify(q.options)}`);
 
+    // The Even App answers a question by POSTing a JSON object keyed by the
+    // question text with the picked option LABEL as the value (mirrors the
+    // reference bridge's `JSON.parse(answer)` in session.js:handleAskUserQuestion).
+    // Unwrap it to the answer string(s) before matching; a bare dictation string
+    // (no JSON) falls through unchanged.
+    const answer = unwrapAnswer(text);
+
     if (q.multi) {
-      const picks = matchMulti(q.options, text);
+      const picks = matchMulti(q.options, answer);
       if (picks.length === 0) {
         emitText(p.sessionId, `Didn't catch that.\n${renderMenu(q)}`);
         return true;
@@ -191,7 +220,7 @@ export function createGsdProvider(cfg: Config) {
       return true;
     }
 
-    const idx = matchAnswer(q.options, text);
+    const idx = matchAnswer(q.options, answer);
     if (idx == null) {
       emitText(p.sessionId, `Didn't catch that.\n${renderMenu(q)}`);
       return true;
