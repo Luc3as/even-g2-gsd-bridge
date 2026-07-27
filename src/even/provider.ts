@@ -9,6 +9,7 @@ import * as tmux from "../gsd/tmux.js";
 import { getPending, clearPending, matchAnswer, matchMulti, renderMenu, getLastMenu, clearLastMenu } from "../gsd/questions.js";
 import { emit, emitText, recordEcho } from "../server/events.js";
 import { buildStatusCard } from "../gsd/status.js";
+import { readAutoState } from "../gsd/auto.js";
 import { log } from "../log.js";
 
 const execFileAsync = promisify(execFile);
@@ -62,6 +63,11 @@ export function createGsdProvider(cfg: Config) {
     // A pending picker means we're waiting on the human, which is idle. Reporting
     // busy here is why the wearer holds the ring, and that ESC kills the turn.
     if (getPending(p.sessionId)) return "idle";
+    // A dead auto-run leaves a fresh transcript mtime but will never write again;
+    // freshness alone would report "busy" for the whole busyWindow, so the /status
+    // route and the list "working" dot lie about a crashed run. The lock death is
+    // authoritative — report idle. Mirrors the tailer's liveness gate (watch.ts).
+    if (readAutoState(p.cwd).liveness === "stopped") return "idle";
     if (!p.newestJsonl) return "idle";
     try {
       const raw = readFileSync(p.newestJsonl, "utf8");

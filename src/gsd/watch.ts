@@ -212,7 +212,7 @@ export function tick(cfg: Config, now: number): void {
     // becomes visible. Runs for EVERY project, client attached or not: a crash
     // while the glasses are dark must still hit the ring so a reconnect surfaces
     // it (emit no-ops the live broadcast but always fills the ring).
-    detectAutoAlarm(p);
+    const autoLiveness = detectAutoAlarm(p);
 
     // Tail EVERY project, even with no SSE client attached, so the message ring
     // keeps a rolling backlog. Otherwise any jsonl written while the glasses are
@@ -270,6 +270,15 @@ export function tick(cfg: Config, now: number): void {
     const chunkVerdict = complete.length ? deriveStatusFromEntries(complete) : null;
     const fresh = now - p.mtimeMs <= cfg.busyWindowMs;
     let want: "busy" | "idle" = chunkVerdict ?? (fresh ? "busy" : "idle");
+    // A dead auto-run (lock pid gone) will never write again, so its transcript
+    // freshness is a lie — the file was written seconds ago but the process is
+    // gone. Without this the freshness gate would assert "busy" for the whole
+    // busyWindow after a crash, and the glasses gate all new input on that busy
+    // (the wearer sees "Thinking"/"Waiting for response", mic reads as an
+    // interrupt-confirm). The lock death is authoritative: force idle so the
+    // input gate releases. Only "stopped" overrides; "running"/"none" defer to
+    // the freshness/chunk verdict as before.
+    if (autoLiveness === "stopped") want = "idle";
     if (getPending(p.sessionId)) want = "idle";
     if (want !== t.status) {
       t.status = want;
@@ -297,7 +306,7 @@ export function tick(cfg: Config, now: number): void {
  *   2. New serious notification — an error, or a pause/halt/blocker warning, with
  *      an id we haven't pushed yet (gsd never flips `read`, so id is the gate).
  */
-function detectAutoAlarm(p: Project): void {
+function detectAutoAlarm(p: Project): AutoLiveness {
   const auto = readAutoState(p.cwd);
   const notif = latestSeriousNotification(p.cwd);
   const prev = lastAlarm.get(p.sessionId) ?? { liveness: auto.liveness, notifId: null };
@@ -308,7 +317,7 @@ function detectAutoAlarm(p: Project): void {
   const firstSight = !lastAlarm.has(p.sessionId);
   if (firstSight) {
     lastAlarm.set(p.sessionId, { liveness: auto.liveness, notifId: notif?.id ?? null });
-    return;
+    return auto.liveness;
   }
 
   let alarmed = false;
@@ -317,6 +326,10 @@ function detectAutoAlarm(p: Project): void {
     const unit = auto.unitId ? ` ${auto.unitId}` : "";
     const reason = notif && notif.id !== prev.notifId ? ` — ${clip(notif.message, 60)}` : "";
     emitText(p.sessionId, `⚠ AUTO-STOPPED${unit}${reason}`);
+    // The idle status frame that releases the glasses' input gate is emitted by
+    // the tailer's status resolution, which honors this "stopped" liveness
+    // (returned below). Keeping it there — not here — means one authority for the
+    // status frame, so the freshness gate can't re-assert busy in the same tick.
     log.warn("watch", `auto-stopped alarm → ${p.sessionId} (unit=${auto.unitId ?? "-"} pid=${auto.pid ?? "-"})`);
     alarmed = true;
     // Fold the notif into this alarm so the notif branch below doesn't double-fire
@@ -331,6 +344,7 @@ function detectAutoAlarm(p: Project): void {
   }
 
   lastAlarm.set(p.sessionId, { liveness: auto.liveness, notifId: notif?.id ?? prev.notifId });
+  return auto.liveness;
 }
 
 /** Trim a message to one lens line, collapsing whitespace/newlines. */

@@ -181,8 +181,20 @@ test("tick alarms once when an auto-run's lock pid goes dead", () => {
     let now = Date.now();
     // Lock held by a live pid (this process) → running. Baseline, no alarm.
     writeFileSync(join(cwd, ".gsd", "auto.lock"), JSON.stringify({ pid: process.pid, unitType: "run-uat", unitId: "M013/S02" }));
-    tick(cfg, now); // first sight → adopts "running" baseline silently
+    tick(cfg, now); // first sight → adopts "running" baseline silently, offset=EOF
     now += 500;
+
+    // A busy chunk lands so the tail status flips to "busy" — the state the
+    // glasses gate input on. The death transition below must force it back to idle.
+    appendFileSync(file, TOOLCALL() + "\n");
+    tick(cfg, now);
+    now += 500;
+    assert.equal(
+      getMessages("--aslug--", 0).filter((m) => m.type === "status").at(-1) &&
+        (getMessages("--aslug--", 0).filter((m) => m.type === "status").at(-1) as { state?: string }).state,
+      "busy",
+      "tail must be busy before the run dies",
+    );
 
     let alarms = getMessages("--aslug--", 0).filter(
       (m) => m.type === "text_delta" && String((m as { text?: string }).text).includes("AUTO-STOPPED"),
@@ -200,6 +212,9 @@ test("tick alarms once when an auto-run's lock pid goes dead", () => {
     );
     assert.equal(alarms.length, 1, "AUTO-STOPPED must fire exactly once on the death transition");
     assert.ok(String((alarms[0] as { text?: string }).text).includes("M013/S02"), "alarm carries the unit id");
+    // The death must release the glasses' input gate: the settling status is idle.
+    const lastStatus = getMessages("--aslug--", 0).filter((m) => m.type === "status").at(-1);
+    assert.equal((lastStatus as { state?: string }).state, "idle", "a dead run must settle the status to idle so the glasses accept input again");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
