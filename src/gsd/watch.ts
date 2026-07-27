@@ -213,37 +213,45 @@ export function tick(cfg: Config, now: number): void {
       log.error("watch", `read failed ${t.file}`, err);
       continue;
     }
+    let complete: string[] = [];
     if (chunk.data) {
-      const lines = chunk.data.split("\n");
       // split's final element is never a complete line: it's the empty string
       // when data ends in "\n", or a partial line when it doesn't. Dropping it
       // in both cases keeps `consumed` byte-exact — counting the trailing "" as
       // +1 drifted the offset one byte per read, corrupting the next line's
       // parse so its entry (often an answer) was silently dropped.
-      const complete = lines.slice(0, -1);
+      complete = chunk.data.split("\n").slice(0, -1);
       let consumed = 0;
       for (const line of complete) {
         emitEntry(p.sessionId, line);
         consumed += Buffer.byteLength(line, "utf8") + 1;
       }
       t.offset += consumed;
-      // Status transition detection: decide off the last assistant message in
-      // the chunk, not a trailing toolResult (which gsd logs after the answer
-      // text and would wrongly re-flip a finished turn to busy).
-      const st = deriveStatusFromEntries(complete);
-      // A pending picker means the turn is blocked on the wearer, not working.
-      // The last jsonl entry is the toolCall that opened it, so deriveStatus says
-      // "busy"; suppress that flip so the glasses don't show "working" over a
-      // question (that false busy is why the wearer holds the ring, killing it).
-      if (st && st !== t.status && !(st === "busy" && getPending(p.sessionId))) {
-        t.status = st;
-        emit(p.sessionId, { type: "status", state: st, sessionId: p.sessionId });
-      }
     }
-    // Idle-by-silence: no writes within busy window flips busy→idle.
-    if (t.status === "busy" && now - p.mtimeMs > cfg.busyWindowMs) {
-      t.status = "idle";
-      emit(p.sessionId, { type: "status", state: "idle", sessionId: p.sessionId });
+
+    // Status resolution. Two signals, chunk-verdict wins when decisive:
+    //  1. Chunk verdict — the last assistant message in bytes read THIS tick.
+    //     Authoritative because it can see a *finished* answer (last entry is
+    //     assistant text → idle) and flip idle early, before the busy window
+    //     lapses. Decided off the last assistant, not a trailing toolResult (gsd
+    //     logs the result AFTER the answer, which would wrongly re-flip to busy).
+    //  2. Freshness — newest transcript across ALL of this project's stores
+    //     (gsd-native rotates a file per turn while the Claude-Code run streams
+    //     continuously) written within the busy window. This is the honest "run
+    //     is live" fallback for when this tick read no decisive chunk: the growth
+    //     may have landed on a sibling file we aren't tailing, so a chunk-only
+    //     gate would never assert busy and the elapsed ticker would stay closed.
+    //     A real >busyWindow stall (nothing written anywhere) still resolves idle
+    //     and stops the ticker — no faked motion.
+    // A pending picker means the turn is blocked on the wearer → force idle (a
+    // false busy over a question is why the wearer holds the ring, killing it).
+    const chunkVerdict = complete.length ? deriveStatusFromEntries(complete) : null;
+    const fresh = now - p.mtimeMs <= cfg.busyWindowMs;
+    let want: "busy" | "idle" = chunkVerdict ?? (fresh ? "busy" : "idle");
+    if (getPending(p.sessionId)) want = "idle";
+    if (want !== t.status) {
+      t.status = want;
+      emit(p.sessionId, { type: "status", state: want, sessionId: p.sessionId });
     }
 
     // ANSWER-mode: a gsd picker leaves no jsonl trace, so scrape the live pane.

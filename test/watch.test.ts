@@ -122,6 +122,45 @@ test("tick suppresses the busy status flip while a picker is pending", () => {
   }
 });
 
+// Regression: the elapsed ticker gate is `status==="busy"`, but busy used to
+// flip ONLY when a tick read growth from the exact file being tailed. gsd-native
+// rotates a transcript file per turn while the Claude-Code run streams to a
+// sibling, so the growth lands off-target and busy never asserted → the ticker
+// stayed frozen for a whole long task. Busy now also asserts from freshness: a
+// transcript written within the busy window means the run is live. A real stall
+// (nothing written past the window) still resolves idle so the ticker stops.
+test("tick asserts busy from mtime freshness when no decisive chunk is read", () => {
+  const store = mkdtempSync(join(tmpdir(), "watch-fresh-"));
+  try {
+    const cwd = "/opt/AI_projects/fresh-probe";
+    const dir = join(store, "--fslug--");
+    mkdirSync(dir);
+    const file = join(dir, "x.jsonl");
+    // A toolCall-only transcript: mid-task, no finished-answer text. The chunk
+    // verdict on first-sight is skipped (offset starts at EOF), so only freshness
+    // can decide — and the file was just written, so it must resolve busy.
+    writeFileSync(file, SESSION(cwd) + "\n" + TOOLCALL() + "\n");
+    const cfg = cfgFor(store);
+
+    // Real wall-clock now so `now - mtimeMs` is a small positive age (fresh).
+    let now = Date.now();
+    tick(cfg, now); // first sight → offset=EOF, status idle, continues (no verdict)
+    tick(cfg, now); // no new chunk, but mtime fresh → freshness asserts busy
+    const busy = getMessages("--fslug--", 0).filter(
+      (m) => m.type === "status" && (m as { state?: string }).state === "busy",
+    );
+    assert.equal(busy.length, 1, "fresh transcript with no decisive chunk must resolve busy");
+
+    // Jump the clock past the busy window with no new write → stale → idle.
+    now += cfg.busyWindowMs + 1000;
+    tick(cfg, now);
+    const last = getMessages("--fslug--", 0).filter((m) => m.type === "status").at(-1);
+    assert.equal((last as { state?: string }).state, "idle", "a stall past the busy window must resolve idle");
+  } finally {
+    rmSync(store, { recursive: true, force: true });
+  }
+});
+
 test("markNextSteps inserts a rule and prefixes each option with an arrow glyph", () => {
   const out = markNextSteps("Posledný commit = X.\nĎalej?\n1. Celý reflog\n2. Iné");
   assert.equal(out, "Posledný commit = X.\n─────\nĎalej?\n▶ 1. Celý reflog\n▶ 2. Iné");
