@@ -79,7 +79,115 @@ test("readProgress reports the active milestone with slice + task counts", () =>
       // First PENDING task in S03 by id = T02 (T01 complete).
       activeTaskId: "T02",
       activeTaskTitle: "T02 title",
+      slices: [
+        { id: "S01", status: "complete" },
+        { id: "S02", status: "complete" },
+        { id: "S03", status: "pending" },
+        { id: "S04", status: "pending" },
+      ],
+      tasks: [
+        { id: "T01", status: "complete" },
+        { id: "T02", status: "pending" },
+        { id: "T03", status: "pending" },
+      ],
     });
+  } finally {
+    cleanup();
+  }
+});
+
+test("readProgress: slice status array is ordered by id even when rows are inserted out of order", () => {
+  const { cwd, cleanup } = makeProject({
+    milestones: [{ id: "M001", status: "active" }],
+    slices: [
+      { milestone_id: "M001", id: "S03", status: "pending" },
+      { milestone_id: "M001", id: "S01", status: "complete" },
+      { milestone_id: "M001", id: "S02", status: "pending" },
+    ],
+  });
+  try {
+    assert.deepEqual(
+      readProgress(cwd)!.slices,
+      [
+        { id: "S01", status: "complete" },
+        { id: "S02", status: "pending" },
+        { id: "S03", status: "pending" },
+      ],
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("readProgress: tasks array covers only the ACTIVE slice, ordered by id", () => {
+  const { cwd, cleanup } = makeProject({
+    milestones: [{ id: "M001", status: "active" }],
+    slices: [
+      { milestone_id: "M001", id: "S01", status: "complete" },
+      { milestone_id: "M001", id: "S02", status: "pending" },
+    ],
+    tasks: [
+      // Tasks of the completed slice must NOT leak into the array.
+      { milestone_id: "M001", slice_id: "S01", id: "T01", status: "complete" },
+      // Active-slice tasks inserted out of order — array must sort by id.
+      { milestone_id: "M001", slice_id: "S02", id: "T02", status: "pending" },
+      { milestone_id: "M001", slice_id: "S02", id: "T01", status: "complete" },
+    ],
+  });
+  try {
+    assert.deepEqual(
+      readProgress(cwd)!.tasks,
+      [
+        { id: "T01", status: "complete" },
+        { id: "T02", status: "pending" },
+      ],
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("readProgress: no active slice → empty tasks array; no slices at all → both arrays empty", () => {
+  const allDone = makeProject({
+    milestones: [{ id: "M001", status: "active" }],
+    slices: [{ milestone_id: "M001", id: "S01", status: "complete" }],
+    tasks: [{ milestone_id: "M001", slice_id: "S01", id: "T01", status: "complete" }],
+  });
+  const bare = makeProject({ milestones: [{ id: "M001", status: "active" }] });
+  try {
+    const done = readProgress(allDone.cwd)!;
+    assert.deepEqual(done.slices, [{ id: "S01", status: "complete" }]);
+    assert.deepEqual(done.tasks, []);
+    const empty = readProgress(bare.cwd)!;
+    assert.deepEqual(empty.slices, []);
+    assert.deepEqual(empty.tasks, []);
+  } finally {
+    allDone.cleanup();
+    bare.cleanup();
+  }
+});
+
+test("readProgress: non-standard statuses (skipped/active) pass through raw in the arrays", () => {
+  // gsd_skip_slice writes status='skipped'; counts treat anything ≠complete as
+  // not-done, but the arrays must carry the raw word so the composer can choose
+  // a distinct glyph later without a schema change here.
+  const { cwd, cleanup } = makeProject({
+    milestones: [{ id: "M001", status: "active" }],
+    slices: [
+      { milestone_id: "M001", id: "S01", status: "skipped" },
+      { milestone_id: "M001", id: "S02", status: "pending" },
+    ],
+    tasks: [{ milestone_id: "M001", slice_id: "S01", id: "T01", status: "active" }],
+  });
+  try {
+    const p = readProgress(cwd)!;
+    assert.deepEqual(p.slices, [
+      { id: "S01", status: "skipped" },
+      { id: "S02", status: "pending" },
+    ]);
+    // First non-complete slice by id is S01 (skipped) — its tasks are the active set.
+    assert.equal(p.activeSliceId, "S01");
+    assert.deepEqual(p.tasks, [{ id: "T01", status: "active" }]);
   } finally {
     cleanup();
   }
@@ -123,56 +231,56 @@ test("readProgress: all slices complete → no active slice, zero tasks", () => 
 
 test("formatProgress: active slice with tasks", () => {
   assert.equal(
-    formatProgress({ milestoneId: "M013", slicesDone: 4, slicesTotal: 8, activeSliceId: "S05", activeSliceTitle: "x", tasksDone: 2, tasksTotal: 5, activeTaskId: "T03", activeTaskTitle: "y" }),
+    formatProgress({ milestoneId: "M013", slicesDone: 4, slicesTotal: 8, activeSliceId: "S05", activeSliceTitle: "x", tasksDone: 2, tasksTotal: 5, activeTaskId: "T03", activeTaskTitle: "y", slices: [], tasks: [] }),
     "M013 ▶ S05 · 4/8 slices · T2/5",
   );
 });
 
 test("formatProgress: active slice, no tasks planned yet (omits T segment)", () => {
   assert.equal(
-    formatProgress({ milestoneId: "M013", slicesDone: 4, slicesTotal: 8, activeSliceId: "S05", activeSliceTitle: "x", tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null }),
+    formatProgress({ milestoneId: "M013", slicesDone: 4, slicesTotal: 8, activeSliceId: "S05", activeSliceTitle: "x", tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null, slices: [], tasks: [] }),
     "M013 ▶ S05 · 4/8 slices",
   );
 });
 
 test("formatProgress: all slices done → check-mark form", () => {
   assert.equal(
-    formatProgress({ milestoneId: "M013", slicesDone: 8, slicesTotal: 8, activeSliceId: null, activeSliceTitle: null, tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null }),
+    formatProgress({ milestoneId: "M013", slicesDone: 8, slicesTotal: 8, activeSliceId: null, activeSliceTitle: null, tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null, slices: [], tasks: [] }),
     "M013 ✓ 8/8 slices",
   );
 });
 
 test("formatProgressRich: slice + task titles on separate lines", () => {
   assert.equal(
-    formatProgressRich({ milestoneId: "M011", slicesDone: 0, slicesTotal: 4, activeSliceId: "S01", activeSliceTitle: "Shared layout & routes", tasksDone: 0, tasksTotal: 2, activeTaskId: "T01", activeTaskTitle: "Scaffold routes" }),
+    formatProgressRich({ milestoneId: "M011", slicesDone: 0, slicesTotal: 4, activeSliceId: "S01", activeSliceTitle: "Shared layout & routes", tasksDone: 0, tasksTotal: 2, activeTaskId: "T01", activeTaskTitle: "Scaffold routes", slices: [], tasks: [] }),
     "M011 ▶ S01 · 0/4 slices\nShared layout & routes\nT0/2 · Scaffold routes",
   );
 });
 
 test("formatProgressRich: no tasks planned → slice title only, no T line", () => {
   assert.equal(
-    formatProgressRich({ milestoneId: "M011", slicesDone: 1, slicesTotal: 4, activeSliceId: "S02", activeSliceTitle: "Email handoff", tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null }),
+    formatProgressRich({ milestoneId: "M011", slicesDone: 1, slicesTotal: 4, activeSliceId: "S02", activeSliceTitle: "Email handoff", tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null, slices: [], tasks: [] }),
     "M011 ▶ S02 · 1/4 slices\nEmail handoff",
   );
 });
 
 test("formatProgressRich: task counted but no title → bare T line", () => {
   assert.equal(
-    formatProgressRich({ milestoneId: "M011", slicesDone: 0, slicesTotal: 2, activeSliceId: "S01", activeSliceTitle: null, tasksDone: 1, tasksTotal: 3, activeTaskId: null, activeTaskTitle: null }),
+    formatProgressRich({ milestoneId: "M011", slicesDone: 0, slicesTotal: 2, activeSliceId: "S01", activeSliceTitle: null, tasksDone: 1, tasksTotal: 3, activeTaskId: null, activeTaskTitle: null, slices: [], tasks: [] }),
     "M011 ▶ S01 · 0/2 slices\nT1/3",
   );
 });
 
 test("formatProgressRich: all slices done → finishing form", () => {
   assert.equal(
-    formatProgressRich({ milestoneId: "M013", slicesDone: 4, slicesTotal: 4, activeSliceId: null, activeSliceTitle: null, tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null }),
+    formatProgressRich({ milestoneId: "M013", slicesDone: 4, slicesTotal: 4, activeSliceId: null, activeSliceTitle: null, tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null, slices: [], tasks: [] }),
     "M013 ✓ 4/4 slices — milestone finishing",
   );
 });
 
 test("formatProgressRich: long title clipped to lens width", () => {
   const long = "A".repeat(60);
-  const out = formatProgressRich({ milestoneId: "M001", slicesDone: 0, slicesTotal: 1, activeSliceId: "S01", activeSliceTitle: long, tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null });
+  const out = formatProgressRich({ milestoneId: "M001", slicesDone: 0, slicesTotal: 1, activeSliceId: "S01", activeSliceTitle: long, tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null, slices: [], tasks: [] });
   const titleLine = out.split("\n")[1]!;
   assert.equal(titleLine.length, 40);
   assert.ok(titleLine.endsWith("…"));
@@ -187,7 +295,7 @@ test("fmtElapsed: sub-minute → seconds, over a minute → Nm Ns", () => {
 });
 
 test("formatProgressRich: elapsedMs appends live ticker to the count line", () => {
-  const p = { milestoneId: "M011", slicesDone: 0, slicesTotal: 4, activeSliceId: "S01", activeSliceTitle: "Shared layout", tasksDone: 0, tasksTotal: 2, activeTaskId: "T01", activeTaskTitle: "Scaffold" };
+  const p = { milestoneId: "M011", slicesDone: 0, slicesTotal: 4, activeSliceId: "S01", activeSliceTitle: "Shared layout", tasksDone: 0, tasksTotal: 2, activeTaskId: "T01", activeTaskTitle: "Scaffold", slices: [], tasks: [] };
   assert.equal(
     formatProgressRich(p, 134_000),
     "M011 ▶ S01 · 0/4 slices · +2m14s\nShared layout\nT0/2 · Scaffold",
@@ -198,7 +306,7 @@ test("formatProgressRich: elapsedMs appends live ticker to the count line", () =
 
 test("formatProgressRich: finishing form ignores elapsedMs (no ticker over idle)", () => {
   assert.equal(
-    formatProgressRich({ milestoneId: "M013", slicesDone: 4, slicesTotal: 4, activeSliceId: null, activeSliceTitle: null, tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null }, 99_000),
+    formatProgressRich({ milestoneId: "M013", slicesDone: 4, slicesTotal: 4, activeSliceId: null, activeSliceTitle: null, tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null, slices: [], tasks: [] }, 99_000),
     "M013 ✓ 4/4 slices — milestone finishing",
   );
 });
@@ -364,7 +472,7 @@ test("readAutoLiveness: freshest active row wins — newest active stale, worker
 });
 
 test("progressSignature changes only when counts/slice/milestone change", () => {
-  const base = { milestoneId: "M001", slicesDone: 1, slicesTotal: 4, activeSliceId: "S02", activeSliceTitle: "x", tasksDone: 1, tasksTotal: 3, activeTaskId: "T02", activeTaskTitle: "y" };
+  const base = { milestoneId: "M001", slicesDone: 1, slicesTotal: 4, activeSliceId: "S02", activeSliceTitle: "x", tasksDone: 1, tasksTotal: 3, activeTaskId: "T02", activeTaskTitle: "y", slices: [], tasks: [] };
   assert.equal(progressSignature(base), progressSignature({ ...base }));
   assert.notEqual(progressSignature(base), progressSignature({ ...base, tasksDone: 2 }));
   assert.notEqual(progressSignature(base), progressSignature({ ...base, slicesDone: 2 }));

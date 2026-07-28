@@ -19,6 +19,12 @@ import { log } from "../log.js";
  * (many zeros).
  */
 
+/** One slice's or task's id + raw DB status ("complete", "pending", "skipped", …). */
+export interface UnitStatus {
+  id: string;
+  status: string;
+}
+
 export interface Progress {
   milestoneId: string;
   slicesDone: number;
@@ -33,6 +39,12 @@ export interface Progress {
   activeTaskId: string | null;
   /** Title of the active task. */
   activeTaskTitle: string | null;
+  /** Every slice of the milestone, ordered by id, with raw DB status — the
+   * dashboard's ✓-range line needs individual statuses, not just counts. */
+  slices: UnitStatus[];
+  /** Tasks of the ACTIVE slice only, ordered by id (glyph row ✓T01 ●T02 ○T03).
+   * Empty when no slice is active. */
+  tasks: UnitStatus[];
 }
 
 /**
@@ -61,8 +73,9 @@ export function readProgress(cwd: string): Progress | null {
     let tasksDone = 0;
     let tasksTotal = 0;
     let activeTask: { id: string; title: string } | null = null;
+    let tasks: { id: string; title: string; status: string }[] = [];
     if (activeSlice) {
-      const tasks = db
+      tasks = db
         .prepare("SELECT id, title, status FROM tasks WHERE milestone_id = ? AND slice_id = ? ORDER BY id")
         .all(m.id, activeSlice.id) as { id: string; title: string; status: string }[];
       tasksTotal = tasks.length;
@@ -81,6 +94,8 @@ export function readProgress(cwd: string): Progress | null {
       tasksTotal,
       activeTaskId: activeTask ? activeTask.id : null,
       activeTaskTitle: activeTask ? activeTask.title : null,
+      slices: slices.map((s) => ({ id: s.id, status: s.status })),
+      tasks: tasks.map((t) => ({ id: t.id, status: t.status })),
     };
   } catch (err) {
     log.debug("progress", `read failed for ${cwd}: ${(err as Error).message}`);
