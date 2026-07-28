@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../log.js";
 
@@ -84,6 +84,75 @@ export function readProgress(cwd: string): Progress | null {
     };
   } catch (err) {
     log.debug("progress", `read failed for ${cwd}: ${(err as Error).message}`);
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
+// GSD's auto-mode heartbeat TTL. A worker refreshes `workers.last_heartbeat_at`
+// every loop iteration; a live worker's heartbeat is always within this window.
+// GSD hardcodes HEARTBEAT_TTL_SECONDS=60 (db/auto-workers.js) and does not export
+// it to foreign readers, so we mirror the constant here. If GSD changes it, this
+// only affects how fast a stopped/stale run is recognized (never correctness of a
+// truly-live one, whose heartbeat is seconds old).
+const HEARTBEAT_TTL_MS = 60_000;
+
+export type AutoDbLiveness = "running" | "stopped";
+
+/**
+ * Authoritative auto-mode liveness from GSD's `workers` table, or null when it
+ * can't be read (no db, no workers table, read error) so the caller can fall back
+ * to the lock-file reader. This is the signal the lock-file pid check is blind to:
+ * the lock pid is the persistent interactive `gsd` TUI (alive whether auto loops
+ * or not), while real liveness is `status='active' AND last_heartbeat_at` within
+ * the TTL, refreshed every loop iteration. Match on `project_root_realpath` (GSD
+ * stores the resolved realpath) and take the freshest active row — the table
+ * accumulates many stale `stopping` rows, so filtering to `active` + newest
+ * heartbeat is what keeps an old row from masking a live run and vice-versa.
+ *
+ *   fresh active row (heartbeat within TTL) → "running"
+ *   stale active row, or only stopping/crashed/no active row → "stopped"
+ *   no db / no workers table / read failure → null (caller falls back to lock)
+ *
+ * Never throws — mirrors readProgress: a broken/locked db degrades to null.
+ */
+export function readAutoLiveness(cwd: string, now = Date.now()): AutoDbLiveness | null {
+  const dbPath = join(cwd, ".gsd", "gsd.db");
+  if (!existsSync(dbPath)) return null;
+
+  // GSD keys workers by the resolved realpath; resolve cwd the same way so a
+  // symlinked project path still matches. Fall back to the raw cwd if realpath
+  // fails (e.g. a path that no longer exists), matching how GSD degrades.
+  let root = cwd;
+  try {
+    root = realpathSync(cwd);
+  } catch {
+    /* keep raw cwd */
+  }
+
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const row = db
+      .prepare(
+        "SELECT last_heartbeat_at FROM workers " +
+          "WHERE project_root_realpath = ? AND status = 'active' " +
+          "ORDER BY last_heartbeat_at DESC LIMIT 1",
+      )
+      .get(root) as { last_heartbeat_at: string } | undefined;
+    if (!row) return "stopped"; // no live worker (only stopping/crashed, or none)
+    const beat = Date.parse(row.last_heartbeat_at);
+    if (Number.isNaN(beat)) return "stopped"; // unparseable timestamp → treat as not-live
+    return now - beat <= HEARTBEAT_TTL_MS ? "running" : "stopped";
+  } catch (err) {
+    // No workers table (older gsd / fresh project) throws here — degrade to null
+    // so the caller keeps its lock-file verdict rather than forcing "stopped".
+    log.debug("progress", `liveness read failed for ${cwd}: ${(err as Error).message}`);
     return null;
   } finally {
     try {

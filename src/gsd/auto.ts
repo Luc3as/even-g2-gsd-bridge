@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
+import { readAutoLiveness } from "./progress.js";
 import { log } from "../log.js";
 
 /**
@@ -7,13 +8,19 @@ import { log } from "../log.js";
  * surfacing crashes/stops on the glasses. The desk `gsd` owns every write here;
  * the bridge only reads the artifacts gsd already emits:
  *
- *   .gsd/auto.lock          — present only while an auto-run holds it. Carries the
- *                             owning pid + the unit it is on. pid alive → running;
- *                             pid dead + lock still present → the run died mid-unit
- *                             (crash/kill) without releasing the lock. This is the
- *                             authoritative liveness signal — far better than the
- *                             jsonl-mtime guess, which can't tell "finished" from
- *                             "died" (both just stop writing).
+ *   .gsd/auto.lock          — a per-unit snapshot gsd writes at unit start (pid +
+ *                             the unit it is on). It is NOT refreshed, and its pid
+ *                             is the persistent interactive `gsd` TUI, which stays
+ *                             alive whether the auto loop runs or not — so a pid-
+ *                             alive check can't tell "auto looping" from "TUI open,
+ *                             auto stopped". We use the lock only for the unit
+ *                             labels (unitId/unitType/pid); real liveness comes
+ *                             from the DB heartbeat below.
+ *   .gsd/gsd.db workers     — gsd's authoritative auto-mode liveness (see
+ *                             progress.ts readAutoLiveness): a live worker refreshes
+ *                             last_heartbeat_at every loop iteration; a stale/absent
+ *                             active row means auto is not live. This is the signal
+ *                             the old pid check was blind to.
  *   .gsd/notifications.jsonl — gsd's own structured failure channel. One JSON
  *                             object per line {id, ts, severity, message, source}.
  *                             severity ∈ info | warning | error. The wearer misses
@@ -56,13 +63,25 @@ function pidAlive(pid: number): boolean {
 }
 
 /**
- * Read auto-mode liveness for a project. "running" = lock held by a live pid;
- * "stopped" = lock present but its pid is dead (died mid-unit); "none" = no lock
- * (not in auto-mode). unitId/unitType/pid are lifted from the lock when present.
+ * Read auto-mode liveness for a project. Liveness comes from gsd's DB heartbeat
+ * (readAutoLiveness), which is the only signal that distinguishes a live auto loop
+ * from an idle-but-open TUI: "running" = a workers row is active with a fresh
+ * heartbeat; "stopped" = the run is not live (stale/absent active row) OR the lock
+ * pid is dead. The lock file supplies only the unit labels (unitId/unitType/pid)
+ * and existence: "none" = no lock (not in auto-mode). When the DB can't be read
+ * (no db / no workers table / read error), fall back to the legacy lock-pid check
+ * so fresh projects and older gsd still resolve.
  */
 export function readAutoState(cwd: string): AutoState {
   const lockPath = join(cwd, ".gsd", "auto.lock");
-  if (!existsSync(lockPath)) return { liveness: "none", unitId: null, unitType: null, pid: null };
+  const hb = readAutoLiveness(cwd);
+  if (!existsSync(lockPath)) {
+    // No lock → not in auto-mode, regardless of any lingering workers rows. A
+    // clean /gsd stop removes the lock, and its workers rows are all 'stopping'
+    // (readAutoLiveness would return "stopped"), so "none" is the honest state and
+    // the status resolver treats it like "stopped" (force idle) anyway.
+    return { liveness: "none", unitId: null, unitType: null, pid: null };
+  }
   let lock: LockShape;
   try {
     lock = JSON.parse(readFileSync(lockPath, "utf8")) as LockShape;
@@ -75,8 +94,11 @@ export function readAutoState(cwd: string): AutoState {
   const pid = typeof lock.pid === "number" ? lock.pid : null;
   const unitId = typeof lock.unitId === "string" ? lock.unitId : null;
   const unitType = typeof lock.unitType === "string" ? lock.unitType : null;
-  // No pid in the lock → can't judge liveness; assume running (a lock exists).
-  const liveness: AutoLiveness = pid == null ? "running" : pidAlive(pid) ? "running" : "stopped";
+  // Heartbeat is authoritative when readable. Only when it can't be read (null)
+  // do we fall back to the legacy pid-alive check (no pid in lock → assume running
+  // since a lock exists).
+  const liveness: AutoLiveness =
+    hb !== null ? hb : pid == null ? "running" : pidAlive(pid) ? "running" : "stopped";
   return { liveness, unitId, unitType, pid };
 }
 

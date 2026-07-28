@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readProgress, formatProgress, formatProgressRich, fmtElapsed, progressSignature } from "../src/gsd/progress.ts";
+import { readProgress, readAutoLiveness, formatProgress, formatProgressRich, fmtElapsed, progressSignature } from "../src/gsd/progress.ts";
 
 // Build a minimal .gsd/gsd.db under a temp cwd matching the live schema
 // (milestones/slices/tasks; slices/tasks carry a title column). Returns the cwd.
@@ -201,6 +201,126 @@ test("formatProgressRich: finishing form ignores elapsedMs (no ticker over idle)
     formatProgressRich({ milestoneId: "M013", slicesDone: 4, slicesTotal: 4, activeSliceId: null, activeSliceTitle: null, tasksDone: 0, tasksTotal: 0, activeTaskId: null, activeTaskTitle: null }, 99_000),
     "M013 ✓ 4/4 slices — milestone finishing",
   );
+});
+
+// ── readAutoLiveness (auto-mode DB heartbeat) ──────────────────────────────
+// Fixed reference instant so heartbeat ages are deterministic (no Date.now flake).
+const NOW = Date.parse("2026-07-28T06:00:00.000Z");
+const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
+
+// Build a .gsd/gsd.db carrying only the workers table (readAutoLiveness ignores
+// milestones/slices/tasks). Rows are keyed by the RESOLVED realpath of cwd, which
+// is what readAutoLiveness matches on (it realpaths cwd before querying).
+function makeWorkers(rows: { status: string; heartbeatMsAgo: number }[], opts?: { noTable?: boolean }): { cwd: string; cleanup: () => void } {
+  const cwd = mkdtempSync(join(tmpdir(), "liveness-"));
+  mkdirSync(join(cwd, ".gsd"));
+  const realpath = realpathSync(cwd);
+  const db = new DatabaseSync(join(cwd, ".gsd", "gsd.db"));
+  if (!opts?.noTable) {
+    db.exec(
+      "CREATE TABLE workers (worker_id TEXT, status TEXT, last_heartbeat_at TEXT, project_root_realpath TEXT)",
+    );
+    let i = 0;
+    for (const r of rows)
+      db.prepare("INSERT INTO workers VALUES (?,?,?,?)").run(`w${i++}`, r.status, iso(r.heartbeatMsAgo), realpath);
+  }
+  db.close();
+  return { cwd, cleanup: () => rmSync(cwd, { recursive: true, force: true }) };
+}
+
+test("readAutoLiveness returns null when there is no .gsd/gsd.db", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "liveness-nodb-"));
+  try {
+    assert.equal(readAutoLiveness(cwd, NOW), null);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("readAutoLiveness returns null when the workers table is absent (older gsd)", () => {
+  const { cwd, cleanup } = makeWorkers([], { noTable: true });
+  try {
+    assert.equal(readAutoLiveness(cwd, NOW), null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("readAutoLiveness: fresh active heartbeat (within 60s TTL) → running", () => {
+  const { cwd, cleanup } = makeWorkers([{ status: "active", heartbeatMsAgo: 5_000 }]);
+  try {
+    assert.equal(readAutoLiveness(cwd, NOW), "running");
+  } finally {
+    cleanup();
+  }
+});
+
+test("readAutoLiveness: stale active heartbeat (90s > 60s TTL) → stopped", () => {
+  const { cwd, cleanup } = makeWorkers([{ status: "active", heartbeatMsAgo: 90_000 }]);
+  try {
+    assert.equal(readAutoLiveness(cwd, NOW), "stopped");
+  } finally {
+    cleanup();
+  }
+});
+
+test("readAutoLiveness: heartbeat exactly at the TTL boundary (60s) → running", () => {
+  const { cwd, cleanup } = makeWorkers([{ status: "active", heartbeatMsAgo: 60_000 }]);
+  try {
+    // now - beat == TTL is within the window (<=), so still live.
+    assert.equal(readAutoLiveness(cwd, NOW), "running");
+  } finally {
+    cleanup();
+  }
+});
+
+test("readAutoLiveness: only stopping rows (no active) → stopped", () => {
+  const { cwd, cleanup } = makeWorkers([
+    { status: "stopping", heartbeatMsAgo: 5_000 },
+    { status: "stopping", heartbeatMsAgo: 120_000 },
+  ]);
+  try {
+    assert.equal(readAutoLiveness(cwd, NOW), "stopped");
+  } finally {
+    cleanup();
+  }
+});
+
+test("readAutoLiveness: empty workers table (no rows) → stopped", () => {
+  const { cwd, cleanup } = makeWorkers([]);
+  try {
+    assert.equal(readAutoLiveness(cwd, NOW), "stopped");
+  } finally {
+    cleanup();
+  }
+});
+
+test("readAutoLiveness: freshest active row wins — a live run beside an ancient active row → running", () => {
+  // Mirrors the live Yummy DB: two active rows, one ancient (Jul-15). ORDER BY
+  // heartbeat DESC must pick the fresh one so the ancient row can't mask a live run.
+  const { cwd, cleanup } = makeWorkers([
+    { status: "active", heartbeatMsAgo: 5_000 },
+    { status: "active", heartbeatMsAgo: 1_000_000_000 },
+  ]);
+  try {
+    assert.equal(readAutoLiveness(cwd, NOW), "running");
+  } finally {
+    cleanup();
+  }
+});
+
+test("readAutoLiveness: freshest active row wins — the newest active is itself stale → stopped", () => {
+  // Both active but the newest heartbeat is still past TTL (the reported Yummy
+  // bug: active status, stale heartbeat, TUI alive). Must read stopped.
+  const { cwd, cleanup } = makeWorkers([
+    { status: "active", heartbeatMsAgo: 200_000 },
+    { status: "active", heartbeatMsAgo: 1_000_000_000 },
+  ]);
+  try {
+    assert.equal(readAutoLiveness(cwd, NOW), "stopped");
+  } finally {
+    cleanup();
+  }
 });
 
 test("progressSignature changes only when counts/slice/milestone change", () => {
