@@ -16,13 +16,18 @@ const execFileAsync = promisify(execFile);
 
 /**
  * True when a glasses utterance is the wearer asking for project status: bare
- * "status", "/status", "/gsd status", or "gsd status" (dictation drops the slash
- * and may sentence-case, so match loosely and case-insensitively). Kept narrow so
- * an ordinary prompt that merely contains the word "status" still routes to gsd.
+ * "status"/"dashboard"/"progress" or the same keyword as "/x", "gsd x", or
+ * "/gsd x" (dictation drops the slash and may sentence-case, so match loosely
+ * and case-insensitively). Kept whole-utterance so an ordinary prompt that
+ * merely contains one of these words still routes to gsd (D001/R001).
  */
-function isStatusCommand(text: string): boolean {
+const STATUS_KEYWORDS = ["status", "dashboard", "progress"];
+
+export function isStatusCommand(text: string): boolean {
   const t = text.trim().toLowerCase().replace(/[.?!…]+$/, "");
-  return t === "status" || t === "/status" || t === "gsd status" || t === "/gsd status";
+  return STATUS_KEYWORDS.some(
+    (k) => t === k || t === `/${k}` || t === `gsd ${k}` || t === `/gsd ${k}`,
+  );
 }
 
 /**

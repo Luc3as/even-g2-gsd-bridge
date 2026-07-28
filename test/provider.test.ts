@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { unwrapAnswer } from "../src/even/provider.ts";
+import { unwrapAnswer, isStatusCommand } from "../src/even/provider.ts";
 
 // The Even App answers a question by POSTing a JSON object keyed by the question
 // text with the picked option label as the value (verified live 2026-07-27):
@@ -30,4 +30,31 @@ test("unwrapAnswer falls back to raw text on malformed or empty JSON", () => {
   assert.equal(unwrapAnswer('{"q":'), '{"q":'); // truncated
   assert.equal(unwrapAnswer("{}"), "{}"); // no string values
   assert.equal(unwrapAnswer('{"q":42}'), '{"q":42}'); // non-string value
+});
+
+// The wearer may say "status", "dashboard", or "progress" — all three intercept
+// in every command form the dictation can produce (whole-utterance rule, D001/R001).
+test("isStatusCommand accepts all three keywords in all four command forms", () => {
+  for (const k of ["status", "dashboard", "progress"]) {
+    assert.equal(isStatusCommand(k), true);
+    assert.equal(isStatusCommand(`/${k}`), true);
+    assert.equal(isStatusCommand(`gsd ${k}`), true);
+    assert.equal(isStatusCommand(`/gsd ${k}`), true);
+  }
+});
+
+test("isStatusCommand tolerates dictation casing, whitespace, and trailing punctuation", () => {
+  assert.equal(isStatusCommand("Dashboard."), true);
+  assert.equal(isStatusCommand("  Progress?  "), true);
+  assert.equal(isStatusCommand("GSD Status"), true);
+  assert.equal(isStatusCommand("Status…"), true);
+});
+
+test("isStatusCommand rejects prompts that merely contain a keyword", () => {
+  assert.equal(isStatusCommand("what is the status of the build"), false);
+  assert.equal(isStatusCommand("show me the dashboard for sales"), false);
+  assert.equal(isStatusCommand("progress the milestone to done"), false);
+  assert.equal(isStatusCommand("update the status page"), false);
+  assert.equal(isStatusCommand("dashboard status"), false); // two keywords ≠ a command
+  assert.equal(isStatusCommand(""), false);
 });
