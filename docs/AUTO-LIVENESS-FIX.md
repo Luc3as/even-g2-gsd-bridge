@@ -1,5 +1,12 @@
 # Auto-mode liveness: why the glasses clock keeps ticking after you stop GSD auto
 
+> **Status: DONE** (2026-07-28). Fix shipped in `bddb310` — `readAutoLiveness`
+> in `src/gsd/progress.ts`, heartbeat-first `readAutoState` in `src/gsd/auto.ts`,
+> no call-site changes. Verified: 91 unit tests pass, `tsc` clean, and live
+> against the real Yummy bug case through the deployed bridge service — status
+> flipped `busy→idle` within one TTL window and the `⚠ AUTO-STOPPED` alarm
+> fired on the running→stopped edge (verification steps 2-4 below).
+
 ## Symptom (reported 2026-07-28)
 
 Yummy project open on the glasses. User stopped/cancelled GSD auto from the
