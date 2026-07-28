@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, mkdirSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readProgress, readAutoLiveness, formatProgress, formatProgressRich, fmtElapsed, progressSignature } from "../src/gsd/progress.ts";
@@ -203,26 +203,29 @@ test("formatProgressRich: finishing form ignores elapsedMs (no ticker over idle)
   );
 });
 
-// ── readAutoLiveness (auto-mode DB heartbeat) ──────────────────────────────
+// ── readAutoLiveness (auto-mode DB heartbeat + worker-pid) ─────────────────
 // Fixed reference instant so heartbeat ages are deterministic (no Date.now flake).
 const NOW = Date.parse("2026-07-28T06:00:00.000Z");
 const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
+// Injected pid probes — never touch real processes in tests.
+const ALIVE = () => true;
+const DEAD = () => false;
 
 // Build a .gsd/gsd.db carrying only the workers table (readAutoLiveness ignores
 // milestones/slices/tasks). Rows are keyed by the RESOLVED realpath of cwd, which
 // is what readAutoLiveness matches on (it realpaths cwd before querying).
-function makeWorkers(rows: { status: string; heartbeatMsAgo: number }[], opts?: { noTable?: boolean }): { cwd: string; cleanup: () => void } {
+function makeWorkers(rows: { status: string; heartbeatMsAgo: number; pid?: number | null }[], opts?: { noTable?: boolean }): { cwd: string; cleanup: () => void } {
   const cwd = mkdtempSync(join(tmpdir(), "liveness-"));
   mkdirSync(join(cwd, ".gsd"));
   const realpath = realpathSync(cwd);
   const db = new DatabaseSync(join(cwd, ".gsd", "gsd.db"));
   if (!opts?.noTable) {
     db.exec(
-      "CREATE TABLE workers (worker_id TEXT, status TEXT, last_heartbeat_at TEXT, project_root_realpath TEXT)",
+      "CREATE TABLE workers (worker_id TEXT, status TEXT, last_heartbeat_at TEXT, pid INTEGER, project_root_realpath TEXT)",
     );
     let i = 0;
     for (const r of rows)
-      db.prepare("INSERT INTO workers VALUES (?,?,?,?)").run(`w${i++}`, r.status, iso(r.heartbeatMsAgo), realpath);
+      db.prepare("INSERT INTO workers VALUES (?,?,?,?,?)").run(`w${i++}`, r.status, iso(r.heartbeatMsAgo), r.pid === undefined ? 4242 : r.pid, realpath);
   }
   db.close();
   return { cwd, cleanup: () => rmSync(cwd, { recursive: true, force: true }) };
@@ -231,7 +234,7 @@ function makeWorkers(rows: { status: string; heartbeatMsAgo: number }[], opts?: 
 test("readAutoLiveness returns null when there is no .gsd/gsd.db", () => {
   const cwd = mkdtempSync(join(tmpdir(), "liveness-nodb-"));
   try {
-    assert.equal(readAutoLiveness(cwd, NOW), null);
+    assert.equal(readAutoLiveness(cwd, NOW, ALIVE), null);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -240,7 +243,7 @@ test("readAutoLiveness returns null when there is no .gsd/gsd.db", () => {
 test("readAutoLiveness returns null when the workers table is absent (older gsd)", () => {
   const { cwd, cleanup } = makeWorkers([], { noTable: true });
   try {
-    assert.equal(readAutoLiveness(cwd, NOW), null);
+    assert.equal(readAutoLiveness(cwd, NOW, ALIVE), null);
   } finally {
     cleanup();
   }
@@ -249,16 +252,55 @@ test("readAutoLiveness returns null when the workers table is absent (older gsd)
 test("readAutoLiveness: fresh active heartbeat (within 60s TTL) → running", () => {
   const { cwd, cleanup } = makeWorkers([{ status: "active", heartbeatMsAgo: 5_000 }]);
   try {
-    assert.equal(readAutoLiveness(cwd, NOW), "running");
+    assert.deepEqual(readAutoLiveness(cwd, NOW, ALIVE), { liveness: "running", quietForMs: null });
   } finally {
     cleanup();
   }
 });
 
-test("readAutoLiveness: stale active heartbeat (90s > 60s TTL) → stopped", () => {
+test("readAutoLiveness: stale heartbeat + worker pid ALIVE → quiet (mid-unit, NOT stopped)", () => {
+  // The false "gsd stopped" the wearer saw: the loop stamps the heartbeat once
+  // per unit (~4-8 min apart) with a 60s TTL, so a healthy run is stale for most
+  // of every unit. An alive worker pid means the unit is executing.
   const { cwd, cleanup } = makeWorkers([{ status: "active", heartbeatMsAgo: 90_000 }]);
   try {
-    assert.equal(readAutoLiveness(cwd, NOW), "stopped");
+    assert.deepEqual(readAutoLiveness(cwd, NOW, ALIVE), { liveness: "quiet", quietForMs: 90_000 });
+  } finally {
+    cleanup();
+  }
+});
+
+test("readAutoLiveness: stale heartbeat + worker pid DEAD → stopped", () => {
+  const { cwd, cleanup } = makeWorkers([{ status: "active", heartbeatMsAgo: 90_000 }]);
+  try {
+    assert.deepEqual(readAutoLiveness(cwd, NOW, DEAD), { liveness: "stopped", quietForMs: null });
+  } finally {
+    cleanup();
+  }
+});
+
+test("readAutoLiveness: stale heartbeat + no usable pid on the row → stopped", () => {
+  // Can't verify life without a pid — match GSD's own janitor and treat as dead.
+  const { cwd, cleanup } = makeWorkers([{ status: "active", heartbeatMsAgo: 90_000, pid: null }]);
+  try {
+    assert.deepEqual(readAutoLiveness(cwd, NOW, ALIVE), { liveness: "stopped", quietForMs: null });
+  } finally {
+    cleanup();
+  }
+});
+
+test("readAutoLiveness: quiet age uses fresher artifact evidence over the heartbeat", () => {
+  // Unit runtime records / activity transcripts are written mid-unit while the
+  // heartbeat is silent — the freshest of them is the honest "last progress".
+  const { cwd, cleanup } = makeWorkers([{ status: "active", heartbeatMsAgo: 300_000 }]);
+  try {
+    const actDir = join(cwd, ".gsd", "activity");
+    mkdirSync(actDir);
+    const f = join(actDir, "520-execute-task-M013-S08-T04.jsonl");
+    writeFileSync(f, "{}\n");
+    const at = new Date(NOW - 120_000);
+    utimesSync(f, at, at);
+    assert.deepEqual(readAutoLiveness(cwd, NOW, ALIVE), { liveness: "quiet", quietForMs: 120_000 });
   } finally {
     cleanup();
   }
@@ -268,7 +310,7 @@ test("readAutoLiveness: heartbeat exactly at the TTL boundary (60s) → running"
   const { cwd, cleanup } = makeWorkers([{ status: "active", heartbeatMsAgo: 60_000 }]);
   try {
     // now - beat == TTL is within the window (<=), so still live.
-    assert.equal(readAutoLiveness(cwd, NOW), "running");
+    assert.deepEqual(readAutoLiveness(cwd, NOW, ALIVE), { liveness: "running", quietForMs: null });
   } finally {
     cleanup();
   }
@@ -280,7 +322,7 @@ test("readAutoLiveness: only stopping rows (no active) → stopped", () => {
     { status: "stopping", heartbeatMsAgo: 120_000 },
   ]);
   try {
-    assert.equal(readAutoLiveness(cwd, NOW), "stopped");
+    assert.deepEqual(readAutoLiveness(cwd, NOW, ALIVE), { liveness: "stopped", quietForMs: null });
   } finally {
     cleanup();
   }
@@ -289,7 +331,7 @@ test("readAutoLiveness: only stopping rows (no active) → stopped", () => {
 test("readAutoLiveness: empty workers table (no rows) → stopped", () => {
   const { cwd, cleanup } = makeWorkers([]);
   try {
-    assert.equal(readAutoLiveness(cwd, NOW), "stopped");
+    assert.deepEqual(readAutoLiveness(cwd, NOW, ALIVE), { liveness: "stopped", quietForMs: null });
   } finally {
     cleanup();
   }
@@ -303,21 +345,19 @@ test("readAutoLiveness: freshest active row wins — a live run beside an ancien
     { status: "active", heartbeatMsAgo: 1_000_000_000 },
   ]);
   try {
-    assert.equal(readAutoLiveness(cwd, NOW), "running");
+    assert.deepEqual(readAutoLiveness(cwd, NOW, ALIVE), { liveness: "running", quietForMs: null });
   } finally {
     cleanup();
   }
 });
 
-test("readAutoLiveness: freshest active row wins — the newest active is itself stale → stopped", () => {
-  // Both active but the newest heartbeat is still past TTL (the reported Yummy
-  // bug: active status, stale heartbeat, TUI alive). Must read stopped.
+test("readAutoLiveness: freshest active row wins — newest active stale, worker dead → stopped", () => {
   const { cwd, cleanup } = makeWorkers([
     { status: "active", heartbeatMsAgo: 200_000 },
     { status: "active", heartbeatMsAgo: 1_000_000_000 },
   ]);
   try {
-    assert.equal(readAutoLiveness(cwd, NOW), "stopped");
+    assert.deepEqual(readAutoLiveness(cwd, NOW, DEAD), { liveness: "stopped", quietForMs: null });
   } finally {
     cleanup();
   }

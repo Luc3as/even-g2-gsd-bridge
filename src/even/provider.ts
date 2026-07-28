@@ -93,8 +93,15 @@ export function createGsdProvider(cfg: Config) {
     // A dead auto-run leaves a fresh transcript mtime but will never write again;
     // freshness alone would report "busy" for the whole busyWindow, so the /status
     // route and the list "working" dot lie about a crashed run. The lock death is
-    // authoritative — report idle. Mirrors the tailer's liveness gate (watch.ts).
-    if (readAutoState(p.cwd).liveness === "stopped") return "idle";
+    // authoritative — report idle. Conversely a "quiet" run (stale heartbeat but
+    // the worker pid is alive — the normal state for most of a unit's execution,
+    // since the loop only stamps the beat once per unit) IS working even when the
+    // transcript is silent past the busyWindow — report busy, else the list dot
+    // reads "gsd stopped" while auto grinds a long task. Mirrors the tailer's
+    // liveness gate (watch.ts).
+    const autoLiveness = readAutoState(p.cwd).liveness;
+    if (autoLiveness === "stopped") return "idle";
+    if (autoLiveness === "quiet") return "busy";
     if (!p.newestJsonl) return "idle";
     try {
       const raw = readFileSync(p.newestJsonl, "utf8");

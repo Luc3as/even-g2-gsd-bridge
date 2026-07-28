@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../log.js";
 
@@ -94,34 +94,105 @@ export function readProgress(cwd: string): Progress | null {
   }
 }
 
-// GSD's auto-mode heartbeat TTL. A worker refreshes `workers.last_heartbeat_at`
-// every loop iteration; a live worker's heartbeat is always within this window.
-// GSD hardcodes HEARTBEAT_TTL_SECONDS=60 (db/auto-workers.js) and does not export
-// it to foreign readers, so we mirror the constant here. If GSD changes it, this
-// only affects how fast a stopped/stale run is recognized (never correctness of a
-// truly-live one, whose heartbeat is seconds old).
+// GSD's auto-mode heartbeat TTL. GSD hardcodes HEARTBEAT_TTL_SECONDS=60
+// (db/auto-workers.js) and does not export it to foreign readers, so we mirror
+// the constant here. IMPORTANT (proven live on Yummy 2026-07-28): the worker
+// heartbeat is stamped only at the TOP of each auto-loop iteration — once per
+// UNIT, i.e. every ~4-8 minutes — never during unit execution. So during a
+// perfectly healthy run the heartbeat is stale for most of every unit, and a
+// stale beat alone must NOT be read as "stopped" (that false alarm is exactly
+// the lie the wearer saw). GSD's own stale-worker logic pairs the lapsed TTL
+// with an OS pid check (auto/loop.js isDeadLocalLeaseHolder); we do the same.
 const HEARTBEAT_TTL_MS = 60_000;
 
-export type AutoDbLiveness = "running" | "stopped";
+export type AutoDbLiveness = "running" | "quiet" | "stopped";
+
+export interface AutoDbState {
+  liveness: AutoDbLiveness;
+  /** ms since the last observed evidence of progress (heartbeat or unit/activity
+   * artifact write). Only meaningful for "quiet"; null otherwise. */
+  quietForMs: number | null;
+}
+
+/** Signal-0 pid probe: ESRCH → dead; EPERM → alive but unsignalable (still alive). */
+export function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Newest evidence-of-progress mtime GSD leaves on disk during a run, in epoch ms,
+ * or null when nothing is readable. Two sources, both written mid-run when the DB
+ * heartbeat is silent:
+ *   .gsd/runtime/units/*.json — unit runtime records, touched at dispatch/progress/
+ *                               finalize (a handful of files; stat each).
+ *   .gsd/activity/NNN-*.jsonl — per-unit transcripts, appended as the unit's agent
+ *                               works. Files are numbered; parse the prefix and
+ *                               stat only the highest-numbered one (lexicographic
+ *                               sort breaks at 999→1000).
+ */
+function newestArtifactMtime(cwd: string): number | null {
+  let newest: number | null = null;
+  const consider = (ms: number) => {
+    if (newest === null || ms > newest) newest = ms;
+  };
+  try {
+    const unitsDir = join(cwd, ".gsd", "runtime", "units");
+    for (const name of readdirSync(unitsDir)) {
+      if (!name.endsWith(".json")) continue;
+      try {
+        consider(statSync(join(unitsDir, name)).mtimeMs);
+      } catch {
+        /* file vanished mid-scan */
+      }
+    }
+  } catch {
+    /* no units dir */
+  }
+  try {
+    const actDir = join(cwd, ".gsd", "activity");
+    let bestNum = -1;
+    let bestName: string | null = null;
+    for (const name of readdirSync(actDir)) {
+      if (!name.endsWith(".jsonl")) continue;
+      const num = parseInt(name, 10);
+      if (Number.isNaN(num) || num <= bestNum) continue;
+      bestNum = num;
+      bestName = name;
+    }
+    if (bestName) consider(statSync(join(actDir, bestName)).mtimeMs);
+  } catch {
+    /* no activity dir */
+  }
+  return newest;
+}
 
 /**
  * Authoritative auto-mode liveness from GSD's `workers` table, or null when it
  * can't be read (no db, no workers table, read error) so the caller can fall back
- * to the lock-file reader. This is the signal the lock-file pid check is blind to:
- * the lock pid is the persistent interactive `gsd` TUI (alive whether auto loops
- * or not), while real liveness is `status='active' AND last_heartbeat_at` within
- * the TTL, refreshed every loop iteration. Match on `project_root_realpath` (GSD
- * stores the resolved realpath) and take the freshest active row — the table
- * accumulates many stale `stopping` rows, so filtering to `active` + newest
- * heartbeat is what keeps an old row from masking a live run and vice-versa.
+ * to the lock-file reader. Match on `project_root_realpath` (GSD stores the
+ * resolved realpath) and take the freshest active row — the table accumulates
+ * stale `stopping` rows, so filtering to `active` + newest heartbeat keeps an old
+ * row from masking a live run and vice-versa.
  *
- *   fresh active row (heartbeat within TTL) → "running"
- *   stale active row, or only stopping/crashed/no active row → "stopped"
- *   no db / no workers table / read failure → null (caller falls back to lock)
+ * Three-state verdict — "stopped" only on hard evidence, so the lens never lies:
+ *   fresh active row (heartbeat within TTL)     → "running"
+ *   stale active row, worker pid ALIVE          → "quiet"  (unit executing; the
+ *     heartbeat only ticks at unit boundaries — see HEARTBEAT_TTL_MS note. The
+ *     age of the freshest progress evidence is reported as quietForMs so callers
+ *     can raise a soft stall warning when it grows absurd, instead of a false
+ *     definitive "stopped".)
+ *   no active row, or stale + worker pid DEAD   → "stopped"
+ *   no db / no workers table / read failure     → null (caller falls back to lock)
  *
  * Never throws — mirrors readProgress: a broken/locked db degrades to null.
+ * `alive` is injectable for tests.
  */
-export function readAutoLiveness(cwd: string, now = Date.now()): AutoDbLiveness | null {
+export function readAutoLiveness(cwd: string, now = Date.now(), alive: (pid: number) => boolean = pidAlive): AutoDbState | null {
   const dbPath = join(cwd, ".gsd", "gsd.db");
   if (!existsSync(dbPath)) return null;
 
@@ -140,15 +211,23 @@ export function readAutoLiveness(cwd: string, now = Date.now()): AutoDbLiveness 
     db = new DatabaseSync(dbPath, { readOnly: true });
     const row = db
       .prepare(
-        "SELECT last_heartbeat_at FROM workers " +
+        "SELECT last_heartbeat_at, pid FROM workers " +
           "WHERE project_root_realpath = ? AND status = 'active' " +
           "ORDER BY last_heartbeat_at DESC LIMIT 1",
       )
-      .get(root) as { last_heartbeat_at: string } | undefined;
-    if (!row) return "stopped"; // no live worker (only stopping/crashed, or none)
+      .get(root) as { last_heartbeat_at: string; pid: number | null } | undefined;
+    if (!row) return { liveness: "stopped", quietForMs: null }; // no live worker (only stopping/crashed, or none)
     const beat = Date.parse(row.last_heartbeat_at);
-    if (Number.isNaN(beat)) return "stopped"; // unparseable timestamp → treat as not-live
-    return now - beat <= HEARTBEAT_TTL_MS ? "running" : "stopped";
+    if (Number.isNaN(beat)) return { liveness: "stopped", quietForMs: null }; // unparseable timestamp → treat as not-live
+    if (now - beat <= HEARTBEAT_TTL_MS) return { liveness: "running", quietForMs: null };
+    // Stale beat: only a dead worker process makes that "stopped"; an alive one
+    // is mid-unit (the loop stamps the beat once per unit). No/invalid pid on the
+    // row → can't verify life → treat as stopped, matching GSD's own janitor.
+    if (typeof row.pid !== "number" || !Number.isInteger(row.pid) || row.pid <= 0 || !alive(row.pid)) {
+      return { liveness: "stopped", quietForMs: null };
+    }
+    const lastSeen = Math.max(beat, newestArtifactMtime(cwd) ?? 0);
+    return { liveness: "quiet", quietForMs: Math.max(0, now - lastSeen) };
   } catch (err) {
     // No workers table (older gsd / fresh project) throws here — degrade to null
     // so the caller keeps its lock-file verdict rather than forcing "stopped".

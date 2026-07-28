@@ -49,8 +49,17 @@ const lastProgress = new Map<string, ProgressState>();
 interface AlarmState {
   liveness: AutoLiveness;
   notifId: string | null;
+  /** True once the soft "quiet too long" warning fired; reset when running resumes. */
+  stallNotified: boolean;
 }
 const lastAlarm = new Map<string, AlarmState>();
+
+// How long a "quiet" run (stale heartbeat, worker pid alive — the normal mid-unit
+// state) may go without ANY progress evidence before the wearer gets a soft
+// warning. Units normally complete in 4-8 min; a single silent agent turn can run
+// ~10 min. This is deliberately a "check when you can", never a definitive
+// "stopped" — the run may legitimately be deep in a long build/verify.
+const STALL_WARN_MS = 15 * 60_000;
 
 function readFrom(path: string, offset: number): { data: string; newOffset: number } {
   const st = statSync(path);
@@ -282,9 +291,13 @@ export function tick(cfg: Config, now: number): void {
     // busyWindow after a crash, and the glasses gate all new input on that busy
     // (the wearer sees "Thinking"/"Waiting for response", mic reads as an
     // interrupt-confirm). The lock death is authoritative: force idle so the
-    // input gate releases. Only "stopped" overrides; "running"/"none" defer to
-    // the freshness/chunk verdict as before.
+    // input gate releases. Conversely a "quiet" run (stale heartbeat, worker pid
+    // alive — the normal mid-unit state) IS working even when the transcript has
+    // gone silent past the busyWindow, so force busy: resolving idle there is the
+    // "gsd stopped (but it wasn't)" lie the wearer reported. "running"/"none"
+    // defer to the freshness/chunk verdict as before.
     if (autoLiveness === "stopped") want = "idle";
+    else if (autoLiveness === "quiet") want = "busy";
     if (getPending(p.sessionId)) want = "idle";
     if (want !== t.status) {
       t.status = want;
@@ -315,18 +328,21 @@ export function tick(cfg: Config, now: number): void {
 function detectAutoAlarm(p: Project): AutoLiveness {
   const auto = readAutoState(p.cwd);
   const notif = latestSeriousNotification(p.cwd);
-  const prev = lastAlarm.get(p.sessionId) ?? { liveness: auto.liveness, notifId: null };
+  const prev = lastAlarm.get(p.sessionId) ?? { liveness: auto.liveness, notifId: null, stallNotified: false };
+  const quietPastWarn = auto.liveness === "quiet" && (auto.quietForMs ?? 0) >= STALL_WARN_MS;
 
   // First sight of this project: adopt current state as baseline WITHOUT
   // alarming, so a bridge restart doesn't re-fire every historical failure. Only
-  // transitions observed live from here on alarm.
+  // transitions observed live from here on alarm. A quiet run already past the
+  // stall threshold counts as "notified" so a restart doesn't re-warn.
   const firstSight = !lastAlarm.has(p.sessionId);
   if (firstSight) {
-    lastAlarm.set(p.sessionId, { liveness: auto.liveness, notifId: notif?.id ?? null });
+    lastAlarm.set(p.sessionId, { liveness: auto.liveness, notifId: notif?.id ?? null, stallNotified: quietPastWarn });
     return auto.liveness;
   }
 
   let alarmed = false;
+  let stallNotified = prev.stallNotified;
 
   if (auto.liveness === "stopped" && prev.liveness !== "stopped") {
     const unit = auto.unitId ? ` ${auto.unitId}` : "";
@@ -343,13 +359,28 @@ function detectAutoAlarm(p: Project): AutoLiveness {
     prev.notifId = notif?.id ?? prev.notifId;
   }
 
+  // Soft stall warning: the run is "quiet" (worker alive, mid-unit — the normal
+  // silent state) but has shown no progress evidence for too long. One-shot until
+  // the run produces a fresh heartbeat again; phrased as uncertainty, never as a
+  // definitive stop — a false "AUTO-STOPPED" while auto worked is the lie this
+  // exists to replace.
+  if (!alarmed && quietPastWarn && !prev.stallNotified) {
+    const unit = auto.unitId ? ` ${auto.unitId}` : "";
+    const mins = Math.round((auto.quietForMs ?? 0) / 60_000);
+    emitText(p.sessionId, `⚠ AUTO-QUIET${unit} — no progress ${mins}m, may be stuck`);
+    log.warn("watch", `auto-quiet alarm → ${p.sessionId} (unit=${auto.unitId ?? "-"} quiet=${mins}m)`);
+    stallNotified = true;
+    alarmed = true;
+  }
+  if (auto.liveness === "running") stallNotified = false;
+
   if (!alarmed && notif && notif.id !== prev.notifId) {
     const tag = notif.severity === "error" ? "⚠ ERROR" : "⚠";
     emitText(p.sessionId, `${tag}: ${clip(notif.message, 72)}`);
     log.warn("watch", `notif alarm → ${p.sessionId} (${notif.severity} ${notif.id})`);
   }
 
-  lastAlarm.set(p.sessionId, { liveness: auto.liveness, notifId: notif?.id ?? prev.notifId });
+  lastAlarm.set(p.sessionId, { liveness: auto.liveness, notifId: notif?.id ?? prev.notifId, stallNotified });
   return auto.liveness;
 }
 

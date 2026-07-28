@@ -37,7 +37,7 @@ const notif = (severity: string, message: string, id: string) => ({
 test("readAutoState: no lock → liveness 'none'", () => {
   const { cwd, cleanup } = makeProject({});
   try {
-    assert.deepEqual(readAutoState(cwd), { liveness: "none", unitId: null, unitType: null, pid: null });
+    assert.deepEqual(readAutoState(cwd), { liveness: "none", quietForMs: null, unitId: null, unitType: null, pid: null });
   } finally {
     cleanup();
   }
