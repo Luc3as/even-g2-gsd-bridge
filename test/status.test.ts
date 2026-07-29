@@ -197,7 +197,7 @@ test("buildStatusCard: no auto.lock renders ○IDLE and STATE.md Next: on line 5
     assert.equal(lines[0], "M013 ○IDLE · 63% · S 2/4 · T 2/4");
     // Idle shows Next:, not a false "▶ T03 in flight" line.
     assert.ok(lines[4]!.startsWith("Next: Slice S03 has no DB tasks"));
-    assert.ok(lines[4]!.length <= 40);
+    assert.ok(lines[4]!.length <= 52);
   } finally {
     cleanup();
   }
@@ -218,7 +218,7 @@ test("buildStatusCard: a real blocker tags ⏸PAUSE and replaces line 5", () => 
     // Worker present + blocker → PAUSE (intentional halt, resumable).
     assert.equal(lines[0], "M013 ⏸PAUSE · 63% · S 2/4 · T 2/4");
     assert.ok(lines[4]!.startsWith("⚠ Blocked: Waiting on Helios column"));
-    assert.ok(lines[4]!.length <= 40);
+    assert.ok(lines[4]!.length <= 52);
     assert.ok(!card.includes("Next:"));
     assert.ok(!card.includes("▶ T03"));
   } finally {
@@ -295,7 +295,7 @@ test("buildStatusCard: unreadable metrics tables omit line 6 without throwing", 
   }
 });
 
-test("buildStatusCard: every line ≤40 chars and ≤6 lines even with long titles", () => {
+test("buildStatusCard: every line ≤52 chars and ≤6 lines even with long titles", () => {
   const long = "An enormously verbose slice title that would never fit a lens line at all";
   const db = midSliceDb();
   db.workers = [{ pid: process.pid, beatAgoMs: 1000 }];
@@ -310,7 +310,7 @@ test("buildStatusCard: every line ≤40 chars and ≤6 lines even with long titl
     const lines = buildStatusCard(cwd, "Proj").split("\n");
     assert.ok(lines.length <= 6, `expected ≤6 lines, got ${lines.length}`);
     for (const line of lines) {
-      assert.ok([...line].length <= 40, `line >40 chars: "${line}"`);
+      assert.ok([...line].length <= 52, `line >52 chars: "${line}"`);
     }
   } finally {
     cleanup();

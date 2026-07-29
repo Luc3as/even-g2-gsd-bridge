@@ -5,7 +5,7 @@ import { readMilestoneMetrics } from "./metrics.js";
 import { readAutoState, classifyDisplayState, type DisplayState } from "./auto.js";
 
 /**
- * Build the ≤6-line × ≤40-char lens dashboard frame the glasses show when the
+ * Build the ≤6-line × ≤52-char lens dashboard frame the glasses show when the
  * wearer asks for "status"/"dashboard"/"progress". Everything is read from
  * artifacts gsd already writes — gsd.db (progress, liveness, metrics) and
  * STATE.md (blocker / next action) — so the frame is instant and needs no live
@@ -23,6 +23,16 @@ import { readAutoState, classifyDisplayState, type DisplayState } from "./auto.j
  * the run is live) > STATE.md Next:. ○IDLE (not in auto-mode) always shows
  * Next: — a "▶ T03" line would falsely imply work in flight.
  */
+
+/**
+ * Lens line width. Measured off the app-export mirror (IMG_2379): a 40-char line
+ * left a wide right margin and a full-width line reached ~55 columns at the text
+ * box edge, so 40 was clipping far too early ("only a few characters per line").
+ * 52 uses most of the real width while keeping a margin, so the firmware never
+ * hard-truncates mid-word — the only `…` comes from our own clip(). Viewport is
+ * ~8 lines tall, so a ≤6-line card fits with headroom.
+ */
+const WIDTH = 52;
 
 /** Display-state tag for line 1. All four glyphs are full-size geometric BMP
  * glyphs proven to paint on the 576x288 lens (▶ ⏸ ⚠ ○ — see KNOWLEDGE). */
@@ -184,37 +194,37 @@ function buildFrame(cwd: string, name: string): string {
   // Line 1: milestone + display-state tag + weighted percent + slice/task counts.
   let l1 = `${prog.milestoneId} ${TAG[disp]} · ${pct(prog)}% · S ${prog.slicesDone}/${prog.slicesTotal}`;
   if (prog.tasksTotal > 0) l1 += ` · T ${prog.tasksDone}/${prog.tasksTotal}`;
-  lines.push(clip(l1, 40));
+  lines.push(clip(l1, WIDTH));
 
   // Line 2: completed-slice range. Omitted when nothing is complete.
   const range = sliceRange(prog.slices);
-  if (range) lines.push(clip(range, 40));
+  if (range) lines.push(clip(range, WIDTH));
 
   // Line 3: active slice. Omitted when all slices are done.
   if (prog.activeSliceId) {
-    lines.push(clip(`● ${prog.activeSliceId}${prog.activeSliceTitle ? ` ${prog.activeSliceTitle}` : ""}`, 40));
+    lines.push(clip(`● ${prog.activeSliceId}${prog.activeSliceTitle ? ` ${prog.activeSliceTitle}` : ""}`, WIDTH));
   }
 
   // Line 4: task glyph row (indent preserved, so no whitespace-normalizing clip).
   const row = taskRow(prog.tasks, prog.activeTaskId);
-  if (row) lines.push(rawClip(row, 40));
+  if (row) lines.push(rawClip(row, WIDTH));
 
   // Line 5: blocker > active task > Next:. nb/blocked computed up front.
   if (blocked && nb) {
-    lines.push(clip(`⚠ Blocked: ${nb.text}`, 40));
+    lines.push(clip(`⚠ Blocked: ${nb.text}`, WIDTH));
   } else if (prog.activeTaskId && disp !== "idle") {
     // Elapsed suffix only while running — a stale open dispatch from a dead or
     // paused run would otherwise show a runaway counter (R010).
     const suffix = live && metrics?.activeElapsedMs != null ? ` · ${fmtAgo(metrics.activeElapsedMs)}` : "";
     const base = `▶ ${prog.activeTaskId}${prog.activeTaskTitle ? ` ${prog.activeTaskTitle}` : ""}`;
-    lines.push(clip(base, 40 - suffix.length) + suffix);
+    lines.push(clip(base, WIDTH - suffix.length) + suffix);
   } else if (nb) {
-    lines.push(clip(`Next: ${nb.text}`, 40));
+    lines.push(clip(`Next: ${nb.text}`, WIDTH));
   }
 
   // Line 6: $ · tok · elapsed. Metrics unreadable → line omitted, never a lie.
   if (metrics) {
-    lines.push(clip(`${fmtCost(metrics.costUsd)} · ${fmtTok(metrics.tokensTotal)} · ${fmtDur(metrics.elapsedMs)}`, 40));
+    lines.push(clip(`${fmtCost(metrics.costUsd)} · ${fmtTok(metrics.tokensTotal)} · ${fmtDur(metrics.elapsedMs)}`, WIDTH));
   }
 
   return lines.join("\n");
