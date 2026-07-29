@@ -5,13 +5,7 @@ import { parseLine, blocksToText, deriveStatusFromEntries } from "./jsonl.js";
 import { listProjects, type Project } from "./sessions.js";
 import { capturePane } from "./tmux.js";
 import { parsePicker, getPending, setPending, clearPending, renderMenu, setLastMenu, clearLastMenu, wasAnswered, clearAnswered } from "./questions.js";
-import { readProgress, formatProgressRich, progressSignature } from "./progress.js";
-import { readAutoState, latestSeriousNotification, type AutoLiveness } from "./auto.js";
-
-// While a task/slice runs (busy) but no count has completed, re-push the progress
-// line this often with a growing bridge-side elapsed ticker, so the wearer sees
-// live motion instead of a frozen count between completions.
-const PROGRESS_TICK_MS = 15_000;
+import { readAutoState, latestSeriousNotification, classifyDisplayState, hasBlocker, type AutoLiveness, type DisplayState } from "./auto.js";
 import { log } from "../log.js";
 
 /**
@@ -30,36 +24,18 @@ interface TailState {
 
 const tails = new Map<string, TailState>();
 
-// Per-session progress push state. `sig` dedups on count change; `seenMs` stamps
-// when the current count-state was first observed (elapsed base); `lastPushMs`
-// throttles the busy-mode elapsed re-push to PROGRESS_TICK_MS.
-interface ProgressState {
-  sig: string;
-  seenMs: number;
-  lastPushMs: number;
-}
-const lastProgress = new Map<string, ProgressState>();
-
-// Per-session alarm dedup so a crash/stop or failure notification fires ONCE, not
-// every tick. `liveness` remembers the last-seen auto-run state so we alarm only
-// on the transition INTO "stopped" (a dead lock lingers, so a level check would
-// re-alarm forever). `notifId` remembers the last serious notification pushed so
-// a new failure (different id) alarms while the same one stays quiet — gsd leaves
-// `read:false` even on consumed entries, so id-dedup is the only reliable gate.
+// Per-session alarm dedup so a crash/stop, pause, or failure notification fires
+// ONCE, not every tick. `disp` remembers the last-seen wearer-facing state so we
+// alarm only on the EDGE into stopped/paused (a dead lock or a lingering blocker
+// would re-alarm forever on a level check). `notifId` remembers the last serious
+// notification pushed so a new failure (different id) alarms while the same one
+// stays quiet — gsd leaves `read:false` even on consumed entries, so id-dedup is
+// the only reliable gate.
 interface AlarmState {
-  liveness: AutoLiveness;
+  disp: DisplayState;
   notifId: string | null;
-  /** True once the soft "quiet too long" warning fired; reset when running resumes. */
-  stallNotified: boolean;
 }
 const lastAlarm = new Map<string, AlarmState>();
-
-// How long a "quiet" run (stale heartbeat, worker pid alive — the normal mid-unit
-// state) may go without ANY progress evidence before the wearer gets a soft
-// warning. Units normally complete in 4-8 min; a single silent agent turn can run
-// ~10 min. This is deliberately a "check when you can", never a definitive
-// "stopped" — the run may legitimately be deep in a long build/verify.
-const STALL_WARN_MS = 15 * 60_000;
 
 function readFrom(path: string, offset: number): { data: string; newOffset: number } {
   const st = statSync(path);
@@ -221,7 +197,7 @@ export function tick(cfg: Config, now: number): void {
     // becomes visible. Runs for EVERY project, client attached or not: a crash
     // while the glasses are dark must still hit the ring so a reconnect surfaces
     // it (emit no-ops the live broadcast but always fills the ring).
-    const autoLiveness = detectAutoAlarm(p);
+    const { liveness: autoLiveness, disp } = detectAutoAlarm(p);
 
     // Tail EVERY project, even with no SSE client attached, so the message ring
     // keeps a rolling backlog. Otherwise any jsonl written while the glasses are
@@ -285,18 +261,16 @@ export function tick(cfg: Config, now: number): void {
       : null;
     const fresh = now - p.mtimeMs <= cfg.busyWindowMs;
     let want: "busy" | "idle" = chunkVerdict ?? (fresh ? "busy" : "idle");
-    // A dead auto-run (lock pid gone) will never write again, so its transcript
-    // freshness is a lie — the file was written seconds ago but the process is
-    // gone. Without this the freshness gate would assert "busy" for the whole
-    // busyWindow after a crash, and the glasses gate all new input on that busy
-    // (the wearer sees "Thinking"/"Waiting for response", mic reads as an
-    // interrupt-confirm). The lock death is authoritative: force idle so the
-    // input gate releases. Conversely a "quiet" run (stale heartbeat, worker pid
-    // alive — the normal mid-unit state) IS working even when the transcript has
-    // gone silent past the busyWindow, so force busy: resolving idle there is the
-    // "gsd stopped (but it wasn't)" lie the wearer reported. "running"/"none"
-    // defer to the freshness/chunk verdict as before.
-    if (autoLiveness === "stopped") want = "idle";
+    // Wearer-facing display state overrides the freshness/chunk verdict for the
+    // input gate. STOPPED (dead lock, OR credit-death: quiet past the stall
+    // ceiling with a still-alive TUI pid) and PAUSED (blocker) both force idle so
+    // the glasses release the input gate — a lingering "busy" over a dead/blocked
+    // run is the "Thinking forever" lie the wearer reported. A "quiet" run still
+    // UNDER the ceiling (disp=running) is genuinely mid-unit work even when the
+    // transcript has gone silent past the busyWindow, so force busy. A fresh
+    // "running" heartbeat and "idle"/none defer to the freshness/chunk verdict, so
+    // a finished-answer chunk can still flip idle early.
+    if (disp === "stopped" || disp === "paused") want = "idle";
     else if (autoLiveness === "quiet") want = "busy";
     if (getPending(p.sessionId)) want = "idle";
     if (want !== t.status) {
@@ -305,126 +279,84 @@ export function tick(cfg: Config, now: number): void {
     }
 
     // ANSWER-mode: a gsd picker leaves no jsonl trace, so scrape the live pane.
-    // Only meaningful when glasses are attached to answer it.
+    // Only meaningful when glasses are attached to answer it. Unsolicited progress
+    // pushing was removed (it stacked stale frames and faked motion); the wearer
+    // pulls the dashboard on demand (buildStatusCard) and gets one-shot transition
+    // alarms from detectAutoAlarm instead.
     if (sessionHasClients(p.sessionId)) {
       detectQuestion(p);
-      detectProgress(p, t.status, now);
     }
   }
 }
 
 /**
- * Surface a stopped/failed auto-run to the glasses as a loud one-line alarm. The
+ * Surface a stopped/paused/failed auto-run to the glasses as a loud one-line
+ * alarm, and return the wearer-facing state the tailer uses to gate input. The
  * jsonl tailer alone can't do this: a crash just stops writes, so status lapses
  * to idle — indistinguishable from a clean finish, which is why the wearer misses
- * failures. Reads gsd's own liveness (auto.lock pid) + failure channel
- * (notifications.jsonl) and pushes on two edges, each deduped so it fires once:
- *   1. Auto-run death — the lock's pid went dead mid-unit (transition into
- *      "stopped"). A dead lock lingers, so we alarm only on the running→stopped
- *      edge, not every tick.
- *   2. New serious notification — an error, or a pause/halt/blocker warning, with
- *      an id we haven't pushed yet (gsd never flips `read`, so id is the gate).
+ * failures. Reads gsd's liveness (auto.lock pid + DB heartbeat), the pause signal
+ * (current-state STATE.md blocker), and the failure channel (notifications.jsonl),
+ * classifies a DisplayState, and pushes on three deduped edges — each fires once:
+ *   1. Into STOPPED — a crash/clean death (pid gone), OR credit-death (quiet past
+ *      the stall ceiling with the TUI pid still alive). Edge-only: a dead run
+ *      lingers, so a level check would re-alarm every tick.
+ *   2. Into PAUSED — a blocker appeared while a worker is present.
+ *   3. New serious notification — an error/pause/cap warning with an id we haven't
+ *      pushed yet (gsd never flips `read`, so id is the gate), when no edge above
+ *      already covered it this tick.
+ * The idle/busy status frame that gates the glasses' input is emitted by the
+ * tailer's status resolution off the returned `disp` — one authority for it.
  */
-function detectAutoAlarm(p: Project): AutoLiveness {
+function detectAutoAlarm(p: Project): { liveness: AutoLiveness; disp: DisplayState } {
   const auto = readAutoState(p.cwd);
   const notif = latestSeriousNotification(p.cwd);
-  const prev = lastAlarm.get(p.sessionId) ?? { liveness: auto.liveness, notifId: null, stallNotified: false };
-  const quietPastWarn = auto.liveness === "quiet" && (auto.quietForMs ?? 0) >= STALL_WARN_MS;
+  // Pause is a LEVEL signal from current-state STATE.md (a blocker), not the
+  // never-cleared notif log — so a resolved pause can't wedge the state forever.
+  const disp = classifyDisplayState(auto, hasBlocker(p.cwd));
+  const prev = lastAlarm.get(p.sessionId);
 
-  // First sight of this project: adopt current state as baseline WITHOUT
-  // alarming, so a bridge restart doesn't re-fire every historical failure. Only
-  // transitions observed live from here on alarm. A quiet run already past the
-  // stall threshold counts as "notified" so a restart doesn't re-warn.
-  const firstSight = !lastAlarm.has(p.sessionId);
-  if (firstSight) {
-    lastAlarm.set(p.sessionId, { liveness: auto.liveness, notifId: notif?.id ?? null, stallNotified: quietPastWarn });
-    return auto.liveness;
+  // First sight of this project: adopt current state as baseline WITHOUT alarming,
+  // so a bridge restart doesn't re-fire every historical stop/pause/failure. Only
+  // transitions observed live from here on alarm.
+  if (!prev) {
+    lastAlarm.set(p.sessionId, { disp, notifId: notif?.id ?? null });
+    return { liveness: auto.liveness, disp };
   }
 
   let alarmed = false;
-  let stallNotified = prev.stallNotified;
+  let notifId = prev.notifId;
+  const unit = auto.unitId ? ` ${auto.unitId}` : "";
+  const reason = () => (notif && notif.id !== prev.notifId ? ` — ${clip(notif.message, 60)}` : "");
 
-  if (auto.liveness === "stopped" && prev.liveness !== "stopped") {
-    const unit = auto.unitId ? ` ${auto.unitId}` : "";
-    const reason = notif && notif.id !== prev.notifId ? ` — ${clip(notif.message, 60)}` : "";
-    emitText(p.sessionId, `⚠ AUTO-STOPPED${unit}${reason}`);
-    // The idle status frame that releases the glasses' input gate is emitted by
-    // the tailer's status resolution, which honors this "stopped" liveness
-    // (returned below). Keeping it there — not here — means one authority for the
-    // status frame, so the freshness gate can't re-assert busy in the same tick.
+  if (disp === "stopped" && prev.disp !== "stopped") {
+    emitText(p.sessionId, `⚠ AUTO-STOPPED${unit}${reason()}`);
     log.warn("watch", `auto-stopped alarm → ${p.sessionId} (unit=${auto.unitId ?? "-"} pid=${auto.pid ?? "-"})`);
     alarmed = true;
-    // Fold the notif into this alarm so the notif branch below doesn't double-fire
-    // the same reason line.
-    prev.notifId = notif?.id ?? prev.notifId;
+    notifId = notif?.id ?? prev.notifId; // fold notif in so the branch below can't double-fire it
   }
 
-  // Soft stall warning: the run is "quiet" (worker alive, mid-unit — the normal
-  // silent state) but has shown no progress evidence for too long. One-shot until
-  // the run produces a fresh heartbeat again; phrased as uncertainty, never as a
-  // definitive stop — a false "AUTO-STOPPED" while auto worked is the lie this
-  // exists to replace.
-  if (!alarmed && quietPastWarn && !prev.stallNotified) {
-    const unit = auto.unitId ? ` ${auto.unitId}` : "";
-    const mins = Math.round((auto.quietForMs ?? 0) / 60_000);
-    emitText(p.sessionId, `⚠ AUTO-QUIET${unit} — no progress ${mins}m, may be stuck`);
-    log.warn("watch", `auto-quiet alarm → ${p.sessionId} (unit=${auto.unitId ?? "-"} quiet=${mins}m)`);
-    stallNotified = true;
+  if (!alarmed && disp === "paused" && prev.disp !== "paused") {
+    emitText(p.sessionId, `⏸ AUTO-PAUSED${unit}${reason()}`);
+    log.warn("watch", `auto-paused alarm → ${p.sessionId} (unit=${auto.unitId ?? "-"})`);
     alarmed = true;
+    notifId = notif?.id ?? prev.notifId;
   }
-  if (auto.liveness === "running") stallNotified = false;
 
   if (!alarmed && notif && notif.id !== prev.notifId) {
     const tag = notif.severity === "error" ? "⚠ ERROR" : "⚠";
     emitText(p.sessionId, `${tag}: ${clip(notif.message, 72)}`);
     log.warn("watch", `notif alarm → ${p.sessionId} (${notif.severity} ${notif.id})`);
+    notifId = notif.id;
   }
 
-  lastAlarm.set(p.sessionId, { liveness: auto.liveness, notifId: notif?.id ?? prev.notifId, stallNotified });
-  return auto.liveness;
+  lastAlarm.set(p.sessionId, { disp, notifId });
+  return { liveness: auto.liveness, disp };
 }
 
 /** Trim a message to one lens line, collapsing whitespace/newlines. */
 function clip(s: string, max: number): string {
   const t = s.replace(/\s+/g, " ").trim();
   return t.length > max ? t.slice(0, max - 1) + "…" : t;
-}
-
-/**
- * Push a live GSD auto-mode progress line to the lens. Read-only DB read (see
- * progress.ts); silent when the project has no active milestone. Only called with
- * clients attached, so a disconnected session accrues no state.
- *
- * Two triggers:
- *  1. Count change — a slice/task completed (or milestone rolled over): push the
- *     fresh line, reset the elapsed clock.
- *  2. Busy elapsed tick — same counts, but auto-mode is mid-task (busy) and the
- *     current state has been on-screen ≥ PROGRESS_TICK_MS: re-push with a growing
- *     `+Nm Ns` ticker so the wearer sees the run is alive, not stalled. Idle
- *     sessions never tick — a frozen line over idle is correct.
- */
-function detectProgress(p: Project, status: "busy" | "idle", now: number): void {
-  const prog = readProgress(p.cwd);
-  if (!prog) {
-    lastProgress.delete(p.sessionId);
-    return;
-  }
-  const sig = progressSignature(prog);
-  const prev = lastProgress.get(p.sessionId);
-
-  if (!prev || prev.sig !== sig) {
-    lastProgress.set(p.sessionId, { sig, seenMs: now, lastPushMs: now });
-    emitText(p.sessionId, formatProgressRich(prog));
-    log.info("watch", `progress → ${p.sessionId} (${sig})`);
-    return;
-  }
-
-  // Same counts. Only re-push while busy and only every PROGRESS_TICK_MS, with the
-  // elapsed ticker so the repaint carries visibly new text (not an identical line).
-  if (status !== "busy" || now - prev.lastPushMs < PROGRESS_TICK_MS) return;
-  prev.lastPushMs = now;
-  emitText(p.sessionId, formatProgressRich(prog, now - prev.seenMs));
-  log.info("watch", `progress tick → ${p.sessionId} (${sig} +${Math.round((now - prev.seenMs) / 1000)}s)`);
 }
 
 /**

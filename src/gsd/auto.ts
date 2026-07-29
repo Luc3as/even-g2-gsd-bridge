@@ -85,6 +85,32 @@ export function classifyDisplayState(
   return "running";
 }
 
+/**
+ * True when a project's STATE.md has a live blocker (a "## Blockers" section whose
+ * first content line isn't "none"). This is the disk-only, current-state pause
+ * signal — STATE.md is rewritten each turn, so unlike the never-cleared
+ * notifications log it can't wedge a resolved pause on forever. Best-effort:
+ * missing/unreadable STATE.md → false.
+ */
+export function hasBlocker(cwd: string): boolean {
+  try {
+    const path = join(cwd, ".gsd", "STATE.md");
+    if (!existsSync(path)) return false;
+    const state = readFileSync(path, "utf8");
+    const m = /^##\s+Blockers\s*$/im.exec(state);
+    if (!m) return false;
+    const rest = state.slice(m.index + m[0].length).split("\n");
+    for (const line of rest) {
+      if (/^##\s/.test(line)) break; // hit the next heading with no content
+      const t = line.replace(/^[-*]\s*/, "").trim();
+      if (t) return !/^none\.?$/i.test(t);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export interface AutoState {
   liveness: AutoLiveness;
   /** ms since the last evidence of progress; set only when liveness="quiet". */

@@ -220,6 +220,64 @@ test("tick alarms once when an auto-run's lock pid goes dead", () => {
   }
 });
 
+// A blocker appearing mid-run is an intentional, resumable halt — distinct from a
+// crash. It must fire ⏸ AUTO-PAUSED once (edge, not every tick) and settle the
+// input gate to idle so the wearer isn't stuck watching "Thinking" over a run that
+// is waiting on something. The pause signal is the current-state STATE.md blocker.
+test("tick alarms once (⏸ AUTO-PAUSED) when a blocker appears mid-run, then settles idle", () => {
+  const root = mkdtempSync(join(tmpdir(), "watch-pause-root-"));
+  try {
+    const cwd = join(root, "paused-proj");
+    mkdirSync(join(cwd, ".gsd"), { recursive: true });
+    const store = join(root, "store");
+    const dir = join(store, "--pauseslug--");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "x.jsonl");
+    writeFileSync(file, SESSION(cwd) + "\n" + ASSISTANT("mid-run answer") + "\n");
+    const cfg = { sessionsDirs: [store], projectRoots: [root], busyWindowMs: 120000, tailIntervalMs: 500 } as Config;
+
+    let now = Date.now();
+    // Live lock (this pid), no blocker → running baseline, no alarm.
+    writeFileSync(join(cwd, ".gsd", "auto.lock"), JSON.stringify({ pid: process.pid, unitType: "execute-task", unitId: "M013/S02" }));
+    writeFileSync(join(cwd, ".gsd", "STATE.md"), "# GSD State\n\n## Blockers\n- None\n");
+    tick(cfg, now); // first sight → adopts "running" baseline silently, offset=EOF
+    now += 500;
+
+    // A busy chunk lands so the tail status flips to "busy" — the state the glasses
+    // gate input on. The pause transition below must force it back to idle.
+    appendFileSync(file, TOOLCALL() + "\n");
+    tick(cfg, now);
+    now += 500;
+    assert.equal(
+      (getMessages("--pauseslug--", 0).filter((m) => m.type === "status").at(-1) as { state?: string }).state,
+      "busy",
+      "tail must be busy before the blocker appears",
+    );
+
+    let pauses = getMessages("--pauseslug--", 0).filter(
+      (m) => m.type === "text_delta" && String((m as { text?: string }).text).includes("AUTO-PAUSED"),
+    );
+    assert.equal(pauses.length, 0, "must not alarm while running with no blocker");
+
+    // A blocker appears: running→paused edge fires once.
+    writeFileSync(join(cwd, ".gsd", "STATE.md"), "# GSD State\n\n## Blockers\n- Waiting on Helios column names\n");
+    tick(cfg, now);
+    now += 500;
+    tick(cfg, now); // second tick over the same blocker must NOT re-alarm
+
+    pauses = getMessages("--pauseslug--", 0).filter(
+      (m) => m.type === "text_delta" && String((m as { text?: string }).text).includes("AUTO-PAUSED"),
+    );
+    assert.equal(pauses.length, 1, "⏸ AUTO-PAUSED must fire exactly once on the pause transition");
+    assert.ok(String((pauses[0] as { text?: string }).text).includes("M013/S02"), "pause alarm carries the unit id");
+    // A paused run releases the input gate: settling status is idle.
+    const lastStatus = getMessages("--pauseslug--", 0).filter((m) => m.type === "status").at(-1);
+    assert.equal((lastStatus as { state?: string }).state, "idle", "a paused run must settle the status to idle");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("markNextSteps inserts a rule and prefixes each option with an arrow glyph", () => {
   const out = markNextSteps("Posledný commit = X.\nĎalej?\n1. Celý reflog\n2. Iné");
   assert.equal(out, "Posledný commit = X.\n─────\nĎalej?\n▶ 1. Celý reflog\n▶ 2. Iné");
