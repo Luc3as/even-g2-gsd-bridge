@@ -229,8 +229,16 @@ export function tick(cfg: Config, now: number): void {
       // parse so its entry (often an answer) was silently dropped.
       complete = chunk.data.split("\n").slice(0, -1);
       let consumed = 0;
+      // Transcript-stream gate: only mirror an *interactive* gsd session's turns
+      // to the lens. During an auto-run (running/quiet/stopped) the firehose of
+      // coding turns buries the pull-based status card and paints as clipped raw
+      // lines — the "cut lines, first few words only" the wearer reported. So
+      // suppress it: the wearer pulls buildStatusCard on demand and gets one-shot
+      // transition alarms from detectAutoAlarm. Offset still advances so the tail
+      // stays byte-exact, and chunkVerdict below still resolves busy/idle status.
+      const streamTranscript = autoLiveness === "none";
       for (const line of complete) {
-        emitEntry(p.sessionId, line);
+        if (streamTranscript) emitEntry(p.sessionId, line);
         consumed += Buffer.byteLength(line, "utf8") + 1;
       }
       t.offset += consumed;

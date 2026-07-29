@@ -315,3 +315,67 @@ test("detects a menu anchored only by an Iné/Other escape option", () => {
   const txt = "Návrhy:\n1. Prvý krok\n2. Druhý krok\n3. Iné — povedz čo";
   assert.deepEqual(nextStepsOptions(txt), ["Prvý krok", "Druhý krok", "Iné — povedz čo"]);
 });
+
+// Firehose gate: during an auto-run (live lock pid → running liveness), an
+// assistant answer written to the transcript must NOT stream to the lens. Left
+// ungated, every coding turn of an unattended auto-run paints as a clipped raw
+// line and buries the pull-based status card — the "cut lines, first few words
+// only" the wearer reported. Status must still resolve busy off the same chunk.
+test("tick does NOT stream transcript turns during an auto-run (firehose gated)", () => {
+  const root = mkdtempSync(join(tmpdir(), "watch-firehose-root-"));
+  try {
+    const cwd = join(root, "auto-proj");
+    mkdirSync(join(cwd, ".gsd"), { recursive: true });
+    const store = join(root, "store");
+    const dir = join(store, "--fslug--");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "x.jsonl");
+    writeFileSync(file, SESSION(cwd) + "\n" + ASSISTANT("older answer") + "\n");
+    const cfg = { sessionsDirs: [store], projectRoots: [root], busyWindowMs: 120000, tailIntervalMs: 500 } as Config;
+
+    let now = Date.now();
+    // Live lock (this pid) → running liveness → auto-run in progress.
+    writeFileSync(join(cwd, ".gsd", "auto.lock"), JSON.stringify({ pid: process.pid, unitType: "run-uat", unitId: "M013/S02" }));
+    tick(cfg, now); // first sight → offset=EOF, baseline
+    now += 500;
+
+    // A coding turn lands mid-run. It must NOT reach the lens as a text_delta…
+    appendFileSync(file, ASSISTANT("Refactored the widening helper and reran the suite.") + "\n");
+    tick(cfg, now);
+    now += 500;
+
+    const deltas = getMessages("--fslug--", 0).filter((m) => m.type === "text_delta");
+    assert.equal(deltas.length, 0, "auto-run transcript must not stream to the lens");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Complement: an interactive gsd session (no auto.lock → liveness "none") still
+// streams its answer to the lens — the gate is auto-mode-only.
+test("tick still streams transcript turns for an interactive session (liveness none)", () => {
+  const store = mkdtempSync(join(tmpdir(), "watch-interactive-"));
+  try {
+    const cwd = "/opt/AI_projects/interactive-probe";
+    const dir = join(store, "--islug--");
+    mkdirSync(dir);
+    const file = join(dir, "x.jsonl");
+    writeFileSync(file, SESSION(cwd) + "\n" + ASSISTANT("older answer") + "\n");
+    const cfg = cfgFor(store);
+
+    let now = 3_000_000;
+    tick(cfg, now); // first sight → offset=EOF
+    now += 500;
+
+    appendFileSync(file, ASSISTANT("Interactive answer.") + "\n");
+    tick(cfg, now);
+    now += 500;
+    tick(cfg, now);
+
+    const deltas = getMessages("--islug--", 0).filter((m) => m.type === "text_delta");
+    assert.equal(deltas.length, 1, "interactive session must still stream its answer");
+    assert.equal((deltas[0] as { text?: string }).text, "Interactive answer.");
+  } finally {
+    rmSync(store, { recursive: true, force: true });
+  }
+});
