@@ -129,9 +129,9 @@ test("buildStatusCard: ▶RUN renders the full 6-line frame", () => {
   }
 });
 
-test("buildStatusCard: stale beat + alive pid renders ◌QUIET, still live", () => {
+test("buildStatusCard: stale beat under the ceiling + alive pid renders ▶RUN, still live", () => {
   const db = midSliceDb();
-  db.workers = [{ pid: process.pid, beatAgoMs: 5 * 60_000 }]; // stale beat, alive pid → quiet
+  db.workers = [{ pid: process.pid, beatAgoMs: 5 * 60_000 }]; // stale beat (quiet) under 15m ceiling → running
   const { cwd, cleanup } = makeProject({
     db,
     lock: { pid: process.pid, unitId: "M013/S03/T03" },
@@ -139,9 +139,31 @@ test("buildStatusCard: stale beat + alive pid renders ◌QUIET, still live", () 
   });
   try {
     const lines = buildStatusCard(cwd, "Proj").split("\n");
-    assert.equal(lines[0], "M013 ◌QUIET · 63% · S 2/4 · T 2/4");
-    // quiet is still live → active-task elapsed suffix stays
+    // The heartbeat only ticks per unit, so brief silence is normal work → RUN, not a state of its own.
+    assert.equal(lines[0], "M013 ▶RUN · 63% · S 2/4 · T 2/4");
+    // still live → active-task elapsed suffix stays
     assert.match(lines[4]!, /^▶ T03 Tablet search collapse · \+\d+m$/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("buildStatusCard: quiet PAST the stall ceiling (credit-death) renders ⚠STOP, no bogus counter", () => {
+  const db = midSliceDb();
+  // Stale beat 20m > 15m ceiling, pid still ALIVE (the persistent TUI after credits died mid-unit).
+  db.workers = [{ pid: process.pid, beatAgoMs: 20 * 60_000 }];
+  const { cwd, cleanup } = makeProject({
+    db,
+    lock: { pid: process.pid, unitId: "M013/S03/T03" },
+    state: STATE_MD,
+  });
+  try {
+    const lines = buildStatusCard(cwd, "Proj").split("\n");
+    // The exact IMG_2379/2380 bug: alive pid + long silence must read STOP, not RUN.
+    assert.equal(lines[0], "M013 ⚠STOP · 63% · S 2/4 · T 2/4");
+    // Not live → no runaway elapsed suffix, and the open dispatch is excluded from line 6.
+    assert.equal(lines[4], "▶ T03 Tablet search collapse");
+    assert.equal(lines[5], "$2.50 · 1.0M tok · 14m");
   } finally {
     cleanup();
   }
@@ -181,9 +203,9 @@ test("buildStatusCard: no auto.lock renders ○IDLE and STATE.md Next: on line 5
   }
 });
 
-test("buildStatusCard: a real blocker replaces line 5", () => {
+test("buildStatusCard: a real blocker tags ⏸PAUSE and replaces line 5", () => {
   const db = midSliceDb();
-  db.workers = [{ pid: process.pid, beatAgoMs: 1000 }];
+  db.workers = [{ pid: process.pid, beatAgoMs: 1000 }]; // fresh beat, but a blocker → paused not running
   const stateWithBlocker = STATE_MD.replace("## Blockers\n- None", "## Blockers\n- Waiting on Helios column names from T01 probe");
   const { cwd, cleanup } = makeProject({
     db,
@@ -193,6 +215,8 @@ test("buildStatusCard: a real blocker replaces line 5", () => {
   try {
     const card = buildStatusCard(cwd, "Proj");
     const lines = card.split("\n");
+    // Worker present + blocker → PAUSE (intentional halt, resumable).
+    assert.equal(lines[0], "M013 ⏸PAUSE · 63% · S 2/4 · T 2/4");
     assert.ok(lines[4]!.startsWith("⚠ Blocked: Waiting on Helios column"));
     assert.ok(lines[4]!.length <= 40);
     assert.ok(!card.includes("Next:"));

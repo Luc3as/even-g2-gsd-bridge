@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readProgress, type Progress, type UnitStatus } from "./progress.js";
 import { readMilestoneMetrics } from "./metrics.js";
-import { readAutoState, type AutoLiveness } from "./auto.js";
+import { readAutoState, classifyDisplayState, type DisplayState } from "./auto.js";
 
 /**
  * Build the ≤6-line × ≤40-char lens dashboard frame the glasses show when the
@@ -24,12 +24,13 @@ import { readAutoState, type AutoLiveness } from "./auto.js";
  * Next: — a "▶ T03" line would falsely imply work in flight.
  */
 
-/** Liveness tag for line 1. ◌ (U+25CC) is unproven on the lens — S02 watches it. */
-const TAG: Record<AutoLiveness, string> = {
+/** Display-state tag for line 1. All four glyphs are full-size geometric BMP
+ * glyphs proven to paint on the 576x288 lens (▶ ⏸ ⚠ ○ — see KNOWLEDGE). */
+const TAG: Record<DisplayState, string> = {
   running: "▶RUN",
-  quiet: "◌QUIET",
+  paused: "⏸PAUSE",
   stopped: "⚠STOP",
-  none: "○IDLE",
+  idle: "○IDLE",
 };
 
 /**
@@ -156,13 +157,32 @@ function buildFrame(cwd: string, name: string): string {
   if (!prog) return `GSD status · ${name}\nNo active GSD milestone.`;
 
   const auto = readAutoState(cwd);
-  const live = auto.liveness === "running" || auto.liveness === "quiet";
+
+  // STATE.md drives both the line-1 pause tag (a blocker means paused) and the
+  // line-5 blocker/Next: swap, so read it once, up front. Best-effort — an
+  // unreadable STATE.md just loses those two contributions.
+  let state = "";
+  try {
+    const statePath = join(cwd, ".gsd", "STATE.md");
+    if (existsSync(statePath)) state = readFileSync(statePath, "utf8");
+  } catch {
+    /* unreadable STATE.md just loses its lines */
+  }
+  const nb = state ? nextOrBlocker(state) : null;
+  const blocked = nb?.label === "Blocked";
+
+  // A blocker in current-state STATE.md is the disk-only "intentionally halted"
+  // signal the card trusts; live pause/cap notifications are edge-detected by the
+  // watch alarm, not this steady-state pull. `live` (metrics + elapsed suffix)
+  // is running-only: paused/stopped must not accrue an in-flight counter.
+  const disp = classifyDisplayState(auto, blocked);
+  const live = disp === "running";
   const metrics = readMilestoneMetrics(cwd, prog.milestoneId, { live });
 
   const lines: string[] = [];
 
-  // Line 1: milestone + liveness tag + weighted percent + slice/task counts.
-  let l1 = `${prog.milestoneId} ${TAG[auto.liveness]} · ${pct(prog)}% · S ${prog.slicesDone}/${prog.slicesTotal}`;
+  // Line 1: milestone + display-state tag + weighted percent + slice/task counts.
+  let l1 = `${prog.milestoneId} ${TAG[disp]} · ${pct(prog)}% · S ${prog.slicesDone}/${prog.slicesTotal}`;
   if (prog.tasksTotal > 0) l1 += ` · T ${prog.tasksDone}/${prog.tasksTotal}`;
   lines.push(clip(l1, 40));
 
@@ -179,20 +199,12 @@ function buildFrame(cwd: string, name: string): string {
   const row = taskRow(prog.tasks, prog.activeTaskId);
   if (row) lines.push(rawClip(row, 40));
 
-  // Line 5: blocker > active task > Next:. STATE.md is best-effort.
-  let state = "";
-  try {
-    const statePath = join(cwd, ".gsd", "STATE.md");
-    if (existsSync(statePath)) state = readFileSync(statePath, "utf8");
-  } catch {
-    /* unreadable STATE.md just loses its lines */
-  }
-  const nb = state ? nextOrBlocker(state) : null;
-  if (nb && nb.label === "Blocked") {
+  // Line 5: blocker > active task > Next:. nb/blocked computed up front.
+  if (blocked && nb) {
     lines.push(clip(`⚠ Blocked: ${nb.text}`, 40));
-  } else if (prog.activeTaskId && auto.liveness !== "none") {
-    // Elapsed suffix only while the run is live — a stale open dispatch from a
-    // dead run would otherwise show a week-long counter (R010).
+  } else if (prog.activeTaskId && disp !== "idle") {
+    // Elapsed suffix only while running — a stale open dispatch from a dead or
+    // paused run would otherwise show a runaway counter (R010).
     const suffix = live && metrics?.activeElapsedMs != null ? ` · ${fmtAgo(metrics.activeElapsedMs)}` : "";
     const base = `▶ ${prog.activeTaskId}${prog.activeTaskTitle ? ` ${prog.activeTaskTitle}` : ""}`;
     lines.push(clip(base, 40 - suffix.length) + suffix);

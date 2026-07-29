@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readAutoState, latestSeriousNotification } from "../src/gsd/auto.ts";
+import { readAutoState, latestSeriousNotification, classifyDisplayState, STALL_CEILING_MS, type AutoState } from "../src/gsd/auto.ts";
 
 // A temp project cwd with a .gsd dir. Optionally seed auto.lock + notifications.
 function makeProject(opts: { lock?: object | string; notifs?: object[] }): {
@@ -160,4 +160,46 @@ test("latestSeriousNotification: absent file → null", () => {
   } finally {
     cleanup();
   }
+});
+
+// --- classifyDisplayState: the wearer-facing running/paused/stopped/idle map ---
+
+const auto = (liveness: AutoState["liveness"], quietForMs: number | null = null): AutoState => ({
+  liveness,
+  quietForMs,
+  unitId: null,
+  unitType: null,
+  pid: null,
+});
+
+test("classifyDisplayState: no lock → idle regardless of pause signal", () => {
+  assert.equal(classifyDisplayState(auto("none"), false), "idle");
+  assert.equal(classifyDisplayState(auto("none"), true), "idle");
+});
+
+test("classifyDisplayState: hard-dead liveness → stopped", () => {
+  assert.equal(classifyDisplayState(auto("stopped"), false), "stopped");
+  // A pause signal cannot resurrect a dead run.
+  assert.equal(classifyDisplayState(auto("stopped"), true), "stopped");
+});
+
+test("classifyDisplayState: quiet PAST the ceiling → stopped (credit-death, pid alive)", () => {
+  assert.equal(classifyDisplayState(auto("quiet", STALL_CEILING_MS), false), "stopped");
+  assert.equal(classifyDisplayState(auto("quiet", STALL_CEILING_MS + 60_000), false), "stopped");
+});
+
+test("classifyDisplayState: quiet UNDER the ceiling → running (brief mid-unit silence is work)", () => {
+  assert.equal(classifyDisplayState(auto("quiet", 5 * 60_000), false), "running");
+  assert.equal(classifyDisplayState(auto("running"), false), "running");
+});
+
+test("classifyDisplayState: pause signal with a live worker → paused", () => {
+  assert.equal(classifyDisplayState(auto("running"), true), "paused");
+  // Quiet-but-under-ceiling is still a live worker, so a blocker there is paused too.
+  assert.equal(classifyDisplayState(auto("quiet", 5 * 60_000), true), "paused");
+});
+
+test("classifyDisplayState: ceiling is injectable", () => {
+  assert.equal(classifyDisplayState(auto("quiet", 3 * 60_000), false, 2 * 60_000), "stopped");
+  assert.equal(classifyDisplayState(auto("quiet", 1 * 60_000), false, 2 * 60_000), "running");
 });

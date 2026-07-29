@@ -34,6 +34,57 @@ import { log } from "../log.js";
 
 export type AutoLiveness = "running" | "quiet" | "stopped" | "none";
 
+/**
+ * Wearer-facing auto-run state — the honest three-plus-one the lens shows. Distinct
+ * from the raw AutoLiveness signal (which exposes "quiet", an internal mid-unit
+ * silence that must never reach the wearer as a state of its own):
+ *   running — a worker is churning: fresh heartbeat, or quiet UNDER the stall
+ *             ceiling (the heartbeat only ticks per unit, so brief silence is work).
+ *   paused  — a worker is present but intentionally halted and resumable: a
+ *             blocker / pause / cap signal, surfaced by the caller.
+ *   stopped — the run is dead or hung with no path to resume on its own: no lock /
+ *             worker pid gone, OR quiet PAST the stall ceiling (a persistent TUI pid
+ *             stays alive after credits die mid-unit, so a stale-but-alive worker
+ *             that has gone silent too long is stopped, not running — this is the
+ *             "false RUN with a bogus ETA after credits died" fix).
+ *   idle    — not in auto-mode at all (no lock: never started, or a clean finish).
+ *             Distinct from stopped: nothing is running ≠ something broke.
+ */
+export type DisplayState = "running" | "paused" | "stopped" | "idle";
+
+/**
+ * How long a "quiet" run (stale heartbeat, worker pid alive) may stay silent before
+ * it is classified STOPPED rather than RUNNING. Units normally complete in 4-8 min
+ * and a single silent agent turn can run ~10 min, so 15m is comfortably past a
+ * healthy unit — past it, a still-alive pid is the persistent TUI, not live work
+ * (the credit-death case). Shared with watch.ts's soft stall warning so the warning
+ * and the state flip happen on the same threshold.
+ */
+export const STALL_CEILING_MS = 15 * 60_000;
+
+/**
+ * Map the raw liveness signal + a caller-supplied pause signal to the wearer-facing
+ * DisplayState. Pure and injectable-ceiling for tests. `pauseSignal` is true when
+ * the caller has current-state evidence of an intentional halt (a STATE.md blocker,
+ * or a fresh pause/cap notification) — the classifier stays agnostic to its source
+ * so the disk-only status card and the live watch alarm can each feed their own.
+ *
+ * Precedence (first match wins): no lock → idle; hard-dead → stopped; quiet past the
+ * ceiling → stopped; pause signal (worker present) → paused; otherwise running.
+ */
+export function classifyDisplayState(
+  auto: AutoState,
+  pauseSignal: boolean,
+  ceilingMs: number = STALL_CEILING_MS,
+): DisplayState {
+  if (auto.liveness === "none") return "idle";
+  if (auto.liveness === "stopped") return "stopped";
+  if (auto.liveness === "quiet" && (auto.quietForMs ?? 0) >= ceilingMs) return "stopped";
+  // Reached only when a worker is present (running, or quiet under the ceiling).
+  if (pauseSignal) return "paused";
+  return "running";
+}
+
 export interface AutoState {
   liveness: AutoLiveness;
   /** ms since the last evidence of progress; set only when liveness="quiet". */
