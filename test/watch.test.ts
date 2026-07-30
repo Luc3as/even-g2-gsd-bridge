@@ -1,12 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tick, markNextSteps, nextStepsOptions } from "../src/gsd/watch.ts";
-import { getMessages } from "../src/server/events.ts";
+import { getMessages, addClient } from "../src/server/events.ts";
 import { setPending, clearPending } from "../src/gsd/questions.ts";
 import type { Config } from "../src/config.ts";
+import type { Response } from "express";
 
 const SESSION = (cwd: string) =>
   JSON.stringify({ type: "session", version: 3, id: "t", timestamp: "2026-07-22T00:00:00.000Z", cwd });
@@ -377,5 +379,251 @@ test("tick still streams transcript turns for an interactive session (liveness n
     assert.equal((deltas[0] as { text?: string }).text, "Interactive answer.");
   } finally {
     rmSync(store, { recursive: true, force: true });
+  }
+});
+
+// ─── Ambient self-updating dashboard (S01) ──────────────────────────────────
+// These exercise the ambient repaint gate in tick(): during an AUTO run only,
+// with a client attached, a progress-signature OR display-state move repaints
+// exactly one buildStatusCard frame — deduped on progressSignature+disp, floored
+// by AMBIENT_MIN_INTERVAL_MS, silent on first sight, silent while dark, and
+// suppressed on a tick where an alarm already fired. Each test drives the real
+// tick() against a real cwd fixture (.gsd/auto.lock for liveness + .gsd/gsd.db
+// for progress) and reads the emitted frames off the events ring (getMessages),
+// exactly the seam the M001 keyword pull and the alarm loop already use.
+
+// Minimal live progress DB: one active milestone, one pending slice, and the
+// given tasks. readProgress reads this read-only; there is no `workers` table, so
+// readAutoLiveness degrades to null and liveness falls back to the lock pid.
+function seedProgressDb(cwd: string, tasks: Array<{ id: string; status: string }>): void {
+  const db = new DatabaseSync(join(cwd, ".gsd", "gsd.db"));
+  try {
+    db.exec(
+      "CREATE TABLE milestones (id TEXT, status TEXT);" +
+        "CREATE TABLE slices (id TEXT, title TEXT, status TEXT, milestone_id TEXT);" +
+        "CREATE TABLE tasks (id TEXT, title TEXT, status TEXT, milestone_id TEXT, slice_id TEXT);",
+    );
+    db.prepare("INSERT INTO milestones (id, status) VALUES (?, ?)").run("M013", "active");
+    db.prepare("INSERT INTO slices (id, title, status, milestone_id) VALUES (?, ?, ?, ?)").run(
+      "S01",
+      "Ambient dashboard",
+      "pending",
+      "M013",
+    );
+    const ins = db.prepare("INSERT INTO tasks (id, title, status, milestone_id, slice_id) VALUES (?, ?, ?, ?, ?)");
+    for (const t of tasks) ins.run(t.id, `${t.id} title`, t.status, "M013", "S01");
+  } finally {
+    db.close();
+  }
+}
+
+// Advance progress the way auto-mode would: mark a task complete. This moves
+// progressSignature (tasksDone + activeTaskId), so the next qualifying tick
+// repaints.
+function completeTask(cwd: string, taskId: string): void {
+  const db = new DatabaseSync(join(cwd, ".gsd", "gsd.db"));
+  try {
+    db.prepare("UPDATE tasks SET status = 'complete' WHERE id = ?").run(taskId);
+  } finally {
+    db.close();
+  }
+}
+
+function writeLock(cwd: string, pid: number): void {
+  writeFileSync(
+    join(cwd, ".gsd", "auto.lock"),
+    JSON.stringify({ pid, unitType: "execute-task", unitId: "M013/S01" }),
+  );
+}
+
+// Attach a no-op SSE client so sessionHasClients() is true. Returns the disposer.
+function attachClient(sessionId: string): () => void {
+  const res = { setHeader() {}, flushHeaders() {}, write() {} } as unknown as Response;
+  return addClient(sessionId, res, false);
+}
+
+// A live auto project fixture: real cwd with .gsd (lock + progress db), a session
+// store whose transcript names that cwd, and a cfg rooted at the tmp dir.
+function autoFixture(prefix: string, tasks: Array<{ id: string; status: string }>) {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  const cwd = join(root, "proj");
+  mkdirSync(join(cwd, ".gsd"), { recursive: true });
+  const store = join(root, "store");
+  const slug = `--${prefix}slug--`;
+  const dir = join(store, slug);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, "x.jsonl");
+  writeFileSync(file, SESSION(cwd) + "\n"); // cwd carrier; no assistant body to stream
+  seedProgressDb(cwd, tasks);
+  const cfg = { sessionsDirs: [store], projectRoots: [root], busyWindowMs: 120000, tailIntervalMs: 500 } as Config;
+  return { root, cwd, slug, cfg };
+}
+
+const cards = (slug: string, after = 0) => getMessages(slug, after).filter((m) => m.type === "text_delta");
+
+// Must-have #4: first sight of an auto project adopts the baseline signature
+// silently — no tick-1 repaint after a bridge restart, even with progress present,
+// a live worker, and a client attached.
+test("ambient: first sight adopts baseline silently (no tick-1 repaint)", () => {
+  const { root, cwd, slug, cfg } = autoFixture("amb-first-", [
+    { id: "T01", status: "pending" },
+    { id: "T02", status: "pending" },
+  ]);
+  const detach = attachClient(slug);
+  try {
+    writeLock(cwd, process.pid); // live pid → running liveness (no workers table)
+    tick(cfg, 5_000_000); // first sight → adopt sig, must NOT paint
+    assert.equal(cards(slug).length, 0, "first sight must not repaint the dashboard");
+  } finally {
+    detach();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Must-have #1: during an AUTO run with a client attached, a task advance
+// repaints exactly one dashboard frame; an unchanged tick repaints nothing
+// (dedup on progressSignature+disp). The frame is the real buildStatusCard.
+test("ambient: repaints one dashboard frame on a progress advance, dedups an unchanged tick", () => {
+  const { root, cwd, slug, cfg } = autoFixture("amb-adv-", [
+    { id: "T01", status: "pending" },
+    { id: "T02", status: "pending" },
+  ]);
+  const detach = attachClient(slug);
+  try {
+    writeLock(cwd, process.pid);
+    tick(cfg, 5_000_000); // first sight → baseline, silent
+    tick(cfg, 5_000_500); // no change → dedup, silent
+    assert.equal(cards(slug).length, 0, "unchanged ticks must not repaint");
+
+    completeTask(cwd, "T01"); // T1/2 done, active task advances → signature moves
+    tick(cfg, 5_001_000); // > 30s since lastPushAt(0) → one repaint
+    let painted = cards(slug);
+    assert.equal(painted.length, 1, "a progress advance must repaint exactly one frame");
+    const text = String((painted[0] as { text?: string }).text);
+    assert.ok(text.includes("▶RUN"), `frame must carry the running tag, got: ${text}`);
+    assert.ok(text.includes("T 1/2"), `frame must reflect the advanced task count, got: ${text}`);
+
+    tick(cfg, 5_002_000); // no further change → dedup, still exactly one
+    painted = cards(slug);
+    assert.equal(painted.length, 1, "an unchanged tick after a repaint must not paint again");
+  } finally {
+    detach();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Must-have #2 (mirror of the firehose gate): an interactive session
+// (autoLiveness === "none", no auto.lock) is NEVER ambient-repainted, even with a
+// client attached and progress moving under it.
+test("ambient: never repaints an interactive session (liveness none)", () => {
+  const { root, cwd, slug, cfg } = autoFixture("amb-inter-", [
+    { id: "T01", status: "pending" },
+    { id: "T02", status: "pending" },
+  ]);
+  const detach = attachClient(slug);
+  try {
+    // No auto.lock written → readAutoState returns "none" → ambient gate is off.
+    tick(cfg, 5_000_000); // first sight
+    completeTask(cwd, "T01"); // progress moves — under an auto-run this would paint
+    tick(cfg, 5_001_000);
+    tick(cfg, 5_002_000);
+    assert.equal(cards(slug).length, 0, "an interactive session must never be ambient-repainted");
+  } finally {
+    detach();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Must-have #3: no push while no client is attached (append-only lens must not
+// accrue a stack of cards while dark), but the stored signature still ADVANCES —
+// so attaching a client does not replay the dark burst, and the next real change
+// pushes exactly once.
+test("ambient: silent while dark, advances the signature, later attach+change pushes exactly once", () => {
+  const { root, cwd, slug, cfg } = autoFixture("amb-dark-", [
+    { id: "T01", status: "pending" },
+    { id: "T02", status: "pending" },
+    { id: "T03", status: "pending" },
+  ]);
+  let detach: (() => void) | null = null;
+  try {
+    writeLock(cwd, process.pid);
+    tick(cfg, 5_000_000); // first sight (no client) → baseline
+
+    completeTask(cwd, "T01");
+    tick(cfg, 5_001_000); // dark advance → track sig, no push
+    completeTask(cwd, "T02");
+    tick(cfg, 5_002_000); // dark advance → track sig, no push
+    assert.equal(cards(slug).length, 0, "no cards may accrue while no client is attached");
+
+    detach = attachClient(slug);
+    tick(cfg, 5_003_000); // attach, no new change → stored sig already current → no replayed burst
+    assert.equal(cards(slug).length, 0, "attaching must not replay the accumulated dark changes");
+
+    completeTask(cwd, "T03");
+    tick(cfg, 5_004_000); // first change after attach → exactly one push
+    assert.equal(cards(slug).length, 1, "the next change after attach must push exactly once");
+  } finally {
+    detach?.();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Must-have #5: the AMBIENT_MIN_INTERVAL_MS floor throttles a burst — two
+// signature changes inside the interval yield only one push; a change after the
+// interval elapses pushes again (a throttle, not a hard cap).
+test("ambient: min-interval floor collapses a burst to one push, then recovers", () => {
+  const { root, cwd, slug, cfg } = autoFixture("amb-throttle-", [
+    { id: "T01", status: "pending" },
+    { id: "T02", status: "pending" },
+    { id: "T03", status: "pending" },
+  ]);
+  const detach = attachClient(slug);
+  try {
+    writeLock(cwd, process.pid);
+    const t0 = 5_000_000;
+    tick(cfg, t0); // first sight → baseline
+
+    completeTask(cwd, "T01");
+    tick(cfg, t0); // sig moves, > 30s since lastPushAt(0) → push #1
+    completeTask(cwd, "T02");
+    tick(cfg, t0 + 5_000); // sig moves again but only +5s → throttled, no push
+    assert.equal(cards(slug).length, 1, "two changes inside the min-interval must yield one push");
+
+    completeTask(cwd, "T03");
+    tick(cfg, t0 + 31_000); // sig moves, now past the 30s floor → push #2
+    assert.equal(cards(slug).length, 2, "a change after the interval elapses must push again");
+  } finally {
+    detach();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Must-have #6: on a tick where detectAutoAlarm already pushed a frame (a
+// stopped/paused edge), the ambient full-frame repaint is SUPPRESSED so the loud
+// one-liner is not shadowed by a stacked card — even though the display-state
+// move (running→stopped) changed the ambient signature.
+test("ambient: suppressed on a tick where a stopped-edge alarm fires", () => {
+  const { root, cwd, slug, cfg } = autoFixture("amb-alarm-", [
+    { id: "T01", status: "pending" },
+    { id: "T02", status: "pending" },
+  ]);
+  const detach = attachClient(slug);
+  try {
+    writeLock(cwd, process.pid); // live → running baseline
+    tick(cfg, 5_000_000); // first sight → baseline (running)
+    const before = getMessages(slug, 0).at(-1)?.id ?? 0;
+
+    // The run dies: lock now names a dead pid → running→stopped edge.
+    writeLock(cwd, 2147483647);
+    tick(cfg, 5_001_000); // alarm fires AND the disp signature moves
+
+    const painted = cards(slug, before);
+    assert.equal(painted.length, 1, "only the alarm one-liner may paint on the alarm tick");
+    const text = String((painted[0] as { text?: string }).text);
+    assert.ok(text.includes("AUTO-STOPPED"), `the single frame must be the alarm, got: ${text}`);
+    assert.ok(!text.includes("▶RUN"), "the ambient full card must be suppressed on the alarm tick");
+  } finally {
+    detach();
+    rmSync(root, { recursive: true, force: true });
   }
 });
