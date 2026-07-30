@@ -222,6 +222,67 @@ test("tick alarms once when an auto-run's lock pid goes dead", () => {
   }
 });
 
+// S03: the stopped-edge alarm carries the channel-correct reason. A hard-dead
+// stop's reason lives in the DB `unit_dispatches` failed row (error_summary), NOT
+// notifications.jsonl — the old alarm sourced its reason ONLY from a serious notif,
+// so a DB-only stop fired the ⚠ tag with no reason. The alarm now reuses the S02
+// stopReason resolver, so the loud AUTO-STOPPED frame carries WHY, and still fires
+// exactly once on the death edge (no re-alarm over the same dead state).
+test("tick's AUTO-STOPPED alarm carries the DB failed-dispatch reason and fires once", () => {
+  const root = mkdtempSync(join(tmpdir(), "watch-stopreason-"));
+  try {
+    const cwd = join(root, "deadproj");
+    mkdirSync(join(cwd, ".gsd"), { recursive: true });
+    const store = join(root, "store");
+    const dir = join(store, "--srslug--");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "x.jsonl");
+    writeFileSync(file, SESSION(cwd) + "\n" + ASSISTANT("mid-run answer") + "\n");
+    const cfg = { sessionsDirs: [store], projectRoots: [root], busyWindowMs: 120000, tailIntervalMs: 500 } as Config;
+
+    // A failed dispatch row on the milestone carries the machine-written reason.
+    // No `workers` table → readAutoLiveness degrades to null and liveness falls
+    // back to the lock pid (dead pid below → "stopped", the hard-dead channel).
+    const db = new DatabaseSync(join(cwd, ".gsd", "gsd.db"));
+    try {
+      db.exec(
+        "CREATE TABLE unit_dispatches (id INTEGER, milestone_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, exit_reason TEXT, error_summary TEXT);",
+      );
+      db.prepare(
+        "INSERT INTO unit_dispatches (id, milestone_id, status, started_at, ended_at, exit_reason, error_summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run(1, "M013", "failed", "2026-07-30T00:00:00.000Z", "2026-07-30T00:05:00.000Z", "cap_exhausted", "Hit per-unit cap after 3 retries");
+    } finally {
+      db.close();
+    }
+
+    let now = Date.now();
+    // Live lock (this pid) → running baseline, no alarm.
+    writeFileSync(join(cwd, ".gsd", "auto.lock"), JSON.stringify({ pid: process.pid, unitType: "execute-task", unitId: "M013/S02" }));
+    tick(cfg, now); // first sight → adopt "running" baseline silently
+    now += 500;
+
+    // The run dies (dead lock pid): running→stopped edge fires once.
+    writeFileSync(join(cwd, ".gsd", "auto.lock"), JSON.stringify({ pid: 2147483647, unitType: "execute-task", unitId: "M013/S02" }));
+    tick(cfg, now);
+    now += 500;
+    tick(cfg, now); // second tick over the same dead state must NOT re-alarm
+
+    const alarms = getMessages("--srslug--", 0).filter(
+      (m) => m.type === "text_delta" && String((m as { text?: string }).text).includes("AUTO-STOPPED"),
+    );
+    assert.equal(alarms.length, 1, "AUTO-STOPPED must fire exactly once on the death transition");
+    const text = String((alarms[0] as { text?: string }).text);
+    assert.ok(text.includes("M013/S02"), `alarm carries the unit id, got: ${text}`);
+    assert.ok(
+      text.includes("Hit per-unit cap after 3 retries"),
+      `alarm must carry the DB failed-dispatch reason, got: ${text}`,
+    );
+    assert.ok(text.includes(" — "), `reason must be em-dash separated from the tag, got: ${text}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // A blocker appearing mid-run is an intentional, resumable halt — distinct from a
 // crash. It must fire ⏸ AUTO-PAUSED once (edge, not every tick) and settle the
 // input gate to idle so the wearer isn't stuck watching "Thinking" over a run that

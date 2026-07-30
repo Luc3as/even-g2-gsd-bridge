@@ -146,7 +146,7 @@ function fmtAgo(ms: number): string {
  * Each source degrades independently (readStopReason / latestSeriousNotification
  * both return null on any read error), so one dead source never blanks the card.
  */
-function stopReason(cwd: string, milestoneId: string, liveness: AutoLiveness): string | null {
+export function stopReason(cwd: string, milestoneId: string, liveness: AutoLiveness): string | null {
   if (liveness === "stopped") {
     const sr = readStopReason(cwd, milestoneId);
     const dbReason = sr?.errorSummary ?? sr?.exitReason ?? null;

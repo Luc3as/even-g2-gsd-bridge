@@ -7,7 +7,7 @@ import { capturePane } from "./tmux.js";
 import { parsePicker, getPending, setPending, clearPending, renderMenu, setLastMenu, clearLastMenu, wasAnswered, clearAnswered } from "./questions.js";
 import { readAutoState, latestSeriousNotification, classifyDisplayState, hasBlocker, type AutoLiveness, type DisplayState } from "./auto.js";
 import { readProgress, progressSignature } from "./progress.js";
-import { buildStatusCard } from "./status.js";
+import { buildStatusCard, stopReason } from "./status.js";
 import { log } from "../log.js";
 
 /**
@@ -398,7 +398,15 @@ function detectAutoAlarm(p: Project): { liveness: AutoLiveness; disp: DisplaySta
   const reason = () => (notif && notif.id !== prev.notifId ? ` — ${clip(notif.message, 60)}` : "");
 
   if (disp === "stopped" && prev.disp !== "stopped") {
-    emitText(p.sessionId, `⚠ AUTO-STOPPED${unit}${reason()}`);
+    // Channel-correct stop reason (reuses the S02 status.ts resolver): the DB
+    // failed-dispatch row for a hard-dead stop, a serious notification for
+    // credit-death/quiet — and never a STALE DB row on a quiet stop. Degrades to
+    // null → the ⚠ tag+unit stands alone (R010: omit, never invent — no dangling
+    // em-dash). milestoneId is the unit id's leading segment (M013/S02 → M013), the
+    // same scope readStopReason keys on.
+    const milestoneId = auto.unitId ? auto.unitId.split("/")[0]! : null;
+    const sr = milestoneId ? stopReason(p.cwd, milestoneId, auto.liveness) : null;
+    emitText(p.sessionId, `⚠ AUTO-STOPPED${unit}${sr ? ` — ${clip(sr, 60)}` : ""}`);
     log.warn("watch", `auto-stopped alarm → ${p.sessionId} (unit=${auto.unitId ?? "-"} pid=${auto.pid ?? "-"})`);
     alarmed = true;
     notifId = notif?.id ?? prev.notifId; // fold notif in so the branch below can't double-fire it
