@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tick, markNextSteps, nextStepsOptions } from "../src/gsd/watch.ts";
 import { getMessages, addClient } from "../src/server/events.ts";
-import { setPending, clearPending } from "../src/gsd/questions.ts";
+import { setPending, clearPending, getPending } from "../src/gsd/questions.ts";
 import type { Config } from "../src/config.ts";
 import type { Response } from "express";
 
@@ -461,6 +461,136 @@ test("tick alarms once (⏸ AUTO-PAUSED) when a blocker appears mid-run, then se
     const lastStatus = getMessages("--pauseslug--", 0).filter((m) => m.type === "status").at(-1);
     assert.equal((lastStatus as { state?: string }).state, "idle", "a paused run must settle the status to idle");
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// S04 T02 (a) — coexistence: the ⏸ AUTO-PAUSED alarm and a pending question card
+// are two INDEPENDENT emits (research: "Ship both"). On the running→paused edge
+// with a picker ALREADY pending — the auto-run asked a real question, which is
+// itself why it halted — the alarm must still fire exactly ONCE, the pending
+// picker must SURVIVE the alarm/ambient path (getPending stays set, unchanged),
+// and the settled input-gate status must be idle so the wearer's utterance routes
+// to POST /question-response, not the App's "quit waiting?" interrupt.
+test("tick's ⏸ AUTO-PAUSED alarm and a pending picker coexist (alarm once, picker survives, status idle)", () => {
+  const root = mkdtempSync(join(tmpdir(), "watch-pausepick-"));
+  try {
+    const cwd = join(root, "paused-picker-proj");
+    mkdirSync(join(cwd, ".gsd"), { recursive: true });
+    const store = join(root, "store");
+    const dir = join(store, "--ppslug--");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "x.jsonl");
+    writeFileSync(file, SESSION(cwd) + "\n" + ASSISTANT("mid-run answer") + "\n");
+    const cfg = { sessionsDirs: [store], projectRoots: [root], busyWindowMs: 120000, tailIntervalMs: 500 } as Config;
+
+    let now = Date.now();
+    // Live lock (this pid), no blocker → running baseline, no alarm.
+    writeFileSync(join(cwd, ".gsd", "auto.lock"), JSON.stringify({ pid: process.pid, unitType: "execute-task", unitId: "M013/S04" }));
+    writeFileSync(join(cwd, ".gsd", "STATE.md"), "# GSD State\n\n## Blockers\n- None\n");
+    tick(cfg, now); // first sight → adopts "running" baseline silently, offset=EOF
+    now += 500;
+
+    // A busy chunk lands so the tail status flips to "busy" (the input-gated state).
+    appendFileSync(file, TOOLCALL() + "\n");
+    tick(cfg, now);
+    now += 500;
+    assert.equal(
+      (getMessages("--ppslug--", 0).filter((m) => m.type === "status").at(-1) as { state?: string }).state,
+      "busy",
+      "tail must be busy before the picker arms and the run pauses",
+    );
+
+    // The auto-run asks a real question → a picker is armed (the S04-T01 compose
+    // seam). That is the halt reason; a blocker also lands in current-state STATE.md.
+    setPending("--ppslug--", {
+      header: "Helios",
+      prompt: "Which column?",
+      options: ["created_at", "inserted_at"],
+      multi: false,
+      signature: "s|Helios|Which column?|created_at|inserted_at",
+    });
+    writeFileSync(join(cwd, ".gsd", "STATE.md"), "# GSD State\n\n## Blockers\n- Waiting on the column pick\n");
+    tick(cfg, now); // running→paused edge, picker pending
+    now += 500;
+    tick(cfg, now); // second tick over the same paused state must NOT re-alarm
+
+    const pauses = getMessages("--ppslug--", 0).filter(
+      (m) => m.type === "text_delta" && String((m as { text?: string }).text).includes("AUTO-PAUSED"),
+    );
+    assert.equal(pauses.length, 1, "⏸ AUTO-PAUSED must fire exactly once even with a picker pending");
+    assert.ok(String((pauses[0] as { text?: string }).text).includes("M013/S04"), "pause alarm carries the unit id");
+
+    // The picker SURVIVES the alarm/ambient path — the pause emit must not clobber it.
+    const still = getPending("--ppslug--");
+    assert.ok(still, "the pending picker must survive the pause edge");
+    assert.equal(
+      still!.signature,
+      "s|Helios|Which column?|created_at|inserted_at",
+      "the surviving picker is byte-for-byte the one that was armed",
+    );
+
+    // A paused run with a pending picker releases the input gate: settling status
+    // is idle, so the utterance answers the card instead of interrupting a turn.
+    const lastStatus = getMessages("--ppslug--", 0).filter((m) => m.type === "status").at(-1);
+    assert.equal((lastStatus as { state?: string }).state, "idle", "a paused run with a pending picker settles the input gate to idle");
+  } finally {
+    clearPending("--ppslug--");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// S04 T02 (b) — negative guard: a STATE.md blocker with NO pane picker emits NO
+// user_question card. The pause path (detectAutoAlarm → hasBlocker) reads the
+// blocker prose only to classify PAUSED and fire the ⏸ alarm; the native question
+// card is emitted SOLELY by detectQuestion when parsePicker finds a real picker
+// box on the captured pane — never synthesized from free-text blocker prose, even
+// prose that looks like a numbered menu (truthfulness / R011). A client is
+// attached so detectQuestion actually runs; capturePane returns "" (no tmux) so
+// parsePicker sees no box → no card.
+test("tick emits NO user_question card from a STATE.md-only blocker (card is parsePicker-driven, never synthesized)", () => {
+  const root = mkdtempSync(join(tmpdir(), "watch-nosynthcard-"));
+  const detach = attachClient("--bnpslug--");
+  try {
+    const cwd = join(root, "blocker-only-proj");
+    mkdirSync(join(cwd, ".gsd"), { recursive: true });
+    const store = join(root, "store");
+    const dir = join(store, "--bnpslug--");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "x.jsonl");
+    writeFileSync(file, SESSION(cwd) + "\n" + ASSISTANT("mid-run answer") + "\n");
+    const cfg = { sessionsDirs: [store], projectRoots: [root], busyWindowMs: 120000, tailIntervalMs: 500 } as Config;
+
+    let now = Date.now();
+    writeFileSync(join(cwd, ".gsd", "auto.lock"), JSON.stringify({ pid: process.pid, unitType: "execute-task", unitId: "M013/S04" }));
+    writeFileSync(join(cwd, ".gsd", "STATE.md"), "# GSD State\n\n## Blockers\n- None\n");
+    tick(cfg, now); // first sight → running baseline
+    now += 500;
+
+    // A blocker appears as FREE-TEXT prose that even mimics a numbered menu — but
+    // it is not a picker box. running→paused edge fires the pause alarm.
+    writeFileSync(
+      join(cwd, ".gsd", "STATE.md"),
+      "# GSD State\n\n## Blockers\n- 1. Rotate secrets  2. Close the gap — which?\n",
+    );
+    tick(cfg, now);
+    now += 500;
+    tick(cfg, now); // second tick over the same blocker must NOT re-alarm
+
+    // The pause alarm DID fire — proves the pause edge was traversed, so the
+    // negative assertion below is not vacuous.
+    const pauses = getMessages("--bnpslug--", 0).filter(
+      (m) => m.type === "text_delta" && String((m as { text?: string }).text).includes("AUTO-PAUSED"),
+    );
+    assert.equal(pauses.length, 1, "the STATE.md blocker must fire ⏸ AUTO-PAUSED exactly once");
+
+    // …but NO native question card was synthesized from the blocker prose.
+    const questionCards = getMessages("--bnpslug--", 0).filter((m) => m.type === "user_question");
+    assert.equal(questionCards.length, 0, "a blocker with no pane picker must NOT emit a user_question card");
+    assert.ok(!getPending("--bnpslug--"), "no picker may be armed from a blocker-only pause");
+  } finally {
+    detach();
+    clearPending("--bnpslug--");
     rmSync(root, { recursive: true, force: true });
   }
 });
