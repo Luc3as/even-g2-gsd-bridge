@@ -2,10 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createGsdProvider, unwrapAnswer, isStatusCommand } from "../src/even/provider.ts";
+import { createGsdProvider, unwrapAnswer, isStatusCommand, isResumeCommand } from "../src/even/provider.ts";
 import { setPending, clearPending } from "../src/gsd/questions.ts";
+import { getMessages } from "../src/server/events.ts";
 import type { Config } from "../src/config.ts";
 
 // The Even App answers a question by POSTing a JSON object keyed by the question
@@ -63,6 +65,109 @@ test("isStatusCommand rejects prompts that merely contain a keyword", () => {
   assert.equal(isStatusCommand("update the status page"), false);
   assert.equal(isStatusCommand("dashboard status"), false); // two keywords ≠ a command
   assert.equal(isStatusCommand(""), false);
+});
+
+// ─── S05 T02: whole-utterance resume normalizer ─────────────────────────────
+// After an AUTO-STOPPED/AUTO-PAUSED alarm the wearer says/types a resume verb to
+// restart the paused `gsd auto` run. isResumeCommand matches "resume"/"continue"/
+// "auto" in every command form the dictation can produce (bare, "/x", "gsd x",
+// "/gsd x"), case/punctuation/slash-insensitive, and prompt() rewrites a match to
+// cfg.resumeCommand before forwarding — same whole-utterance discipline as
+// isStatusCommand so an ordinary prompt merely CONTAINING one of these words
+// still routes verbatim (D001/R001).
+test("isResumeCommand accepts all three keywords in all four command forms", () => {
+  for (const k of ["resume", "continue", "auto"]) {
+    assert.equal(isResumeCommand(k), true);
+    assert.equal(isResumeCommand(`/${k}`), true);
+    assert.equal(isResumeCommand(`gsd ${k}`), true);
+    assert.equal(isResumeCommand(`/gsd ${k}`), true);
+  }
+});
+
+test("isResumeCommand tolerates dictation casing, whitespace, and trailing punctuation", () => {
+  assert.equal(isResumeCommand("Resume."), true);
+  assert.equal(isResumeCommand("  Continue?  "), true);
+  assert.equal(isResumeCommand("GSD Auto"), true);
+  assert.equal(isResumeCommand("Auto…"), true);
+});
+
+test("isResumeCommand rejects prompts that merely contain a keyword", () => {
+  assert.equal(isResumeCommand("continue the refactor"), false);
+  assert.equal(isResumeCommand("resume writing the summary"), false);
+  assert.equal(isResumeCommand("set the car to auto mode"), false);
+  assert.equal(isResumeCommand("auto resume"), false); // two keywords ≠ a command
+  assert.equal(isResumeCommand(""), false);
+});
+
+// A live-pane project fixture: real cwd + a session store transcript naming it so
+// findProject resolves the slug, plus a real detached tmux session (running `cat`)
+// under the sersám-compatible name so prompt()'s sendPrompt has a live target and
+// its literal keystrokes are readable back off the pane — a genuine tmux spy.
+function liveFixture(prefix: string, base: string) {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  const cwd = join(root, base);
+  mkdirSync(cwd, { recursive: true });
+  const store = join(root, "store");
+  const slug = `--${prefix}slug--`;
+  const dir = join(store, slug);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "x.jsonl"),
+    JSON.stringify({ type: "session", version: 3, id: "t", timestamp: "2026-07-30T00:00:00.000Z", cwd }) + "\n",
+  );
+  const tmuxName = base; // tmuxNameFor(basename(cwd)) — base is already [A-Za-z0-9_-]
+  execFileSync("tmux", ["new-session", "-d", "-s", tmuxName, "cat"]);
+  const cfg = {
+    sessionsDirs: [store],
+    projectRoots: [root],
+    busyWindowMs: 120000,
+    resumeCommand: "/gsd auto",
+    allowSpawn: false,
+  } as Config;
+  return { root, slug, tmuxName, cfg };
+}
+
+test("prompt() rewrites a matched resume utterance to cfg.resumeCommand into the live pane", async () => {
+  const { root, slug, tmuxName, cfg } = liveFixture("prov-resume-", "resumeproj");
+  const provider = createGsdProvider(cfg);
+  try {
+    await provider.prompt(slug, "resume");
+    // The optimistic echo carries the SAME variable that was handed to
+    // tmux.sendPrompt — proving the forwarded arg is the normalized command.
+    const frames = getMessages(slug, 0).filter((f) => f.type === "user_prompt");
+    assert.equal(frames.at(-1)!.text, "/gsd auto", "resume utterance forwards as the canonical command");
+    // And confirm the literal keystrokes actually reached the live tmux pane.
+    const pane = execFileSync("tmux", ["capture-pane", "-t", tmuxName, "-p"]).toString();
+    assert.ok(pane.includes("/gsd auto"), "the canonical command was typed into the pane");
+  } finally {
+    try {
+      execFileSync("tmux", ["kill-session", "-t", tmuxName]);
+    } catch {
+      /* already gone */
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("prompt() forwards an ordinary prompt verbatim (no resume rewrite)", async () => {
+  const { root, slug, tmuxName, cfg } = liveFixture("prov-verbatim-", "verbatimproj");
+  const provider = createGsdProvider(cfg);
+  try {
+    await provider.prompt(slug, "continue the refactor");
+    const frames = getMessages(slug, 0).filter((f) => f.type === "user_prompt");
+    assert.equal(
+      frames.at(-1)!.text,
+      "continue the refactor",
+      "a prompt that merely contains a resume word is not rewritten",
+    );
+  } finally {
+    try {
+      execFileSync("tmux", ["kill-session", "-t", tmuxName]);
+    } catch {
+      /* already gone */
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ─── S05 T01: the input gate opens on a paused/stopped auto-run ──────────────

@@ -31,6 +31,24 @@ export function isStatusCommand(text: string): boolean {
 }
 
 /**
+ * True when a glasses utterance is the wearer asking to RESTART a paused/stopped
+ * `gsd auto` run: bare "resume"/"continue"/"auto", or the same as "/x", "gsd x",
+ * or "/gsd x" (dictation drops the slash and may sentence-case, so match loosely
+ * and case-insensitively; the same whole-utterance discipline as isStatusCommand
+ * so an ordinary prompt that merely CONTAINS one of these words still routes
+ * verbatim — "continue the refactor" is a real prompt, not a resume). A match is
+ * rewritten to cfg.resumeCommand before forwarding (prompt()).
+ */
+const RESUME_KEYWORDS = ["resume", "continue", "auto"];
+
+export function isResumeCommand(text: string): boolean {
+  const t = text.trim().toLowerCase().replace(/[.?!…]+$/, "");
+  return RESUME_KEYWORDS.some(
+    (k) => t === k || t === `/${k}` || t === `gsd ${k}` || t === `/gsd ${k}`,
+  );
+}
+
+/**
  * The Even App answers a question by POSTing a JSON object keyed by the question
  * text with the picked option label(s) as values, e.g. {"Pick a fruit":"Apple"}
  * (this mirrors the reference bridge's own `JSON.parse(answer)`; see
@@ -291,6 +309,21 @@ export function createGsdProvider(cfg: Config) {
         const n = Number(m[1]);
         if (n >= 1 && n <= menu.length) text = `${n}. ${menu[n - 1]}`;
       }
+    }
+
+    // Whole-utterance resume: after an AUTO-STOPPED/AUTO-PAUSED alarm the wearer
+    // says/types a resume phrasing ("resume"/"continue"/"auto"/"gsd auto",
+    // slash- and case-insensitive). The status gate (T01) is what opened the
+    // App's input arm on a paused/stopped run so this utterance reached us;
+    // here we rewrite it to the canonical configurable command so the paused
+    // `gsd auto` run actually restarts. Placed AFTER the picker/status/menu
+    // gates (a resume word during an open picker is a menu answer, not a
+    // restart) but ahead of the shared sendPrompt path, which still owns the
+    // recordEcho + optimistic user_prompt echo below. Logged like prompt/status
+    // so a rewritten resume is auditable in the journal.
+    if (isResumeCommand(text)) {
+      log.info("provider", `resume → ${p.tmuxName} ("${text}" → ${cfg.resumeCommand})`);
+      text = cfg.resumeCommand;
     }
 
     const isLive = await tmux.hasSession(p.tmuxName);

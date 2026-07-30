@@ -42,6 +42,12 @@ export interface Config {
   tailIntervalMs: number;
   /** A session is "busy" only if its jsonl changed within this window. */
   busyWindowMs: number;
+  /**
+   * Canonical command a matched resume utterance is rewritten to before it is
+   * forwarded into the live tmux pane (see isResumeCommand). Restarts a
+   * paused/stopped `gsd auto` run. Override via env RESUME_COMMAND.
+   */
+  resumeCommand: string;
 }
 
 function envList(name: string, fallback: string[]): string[] {
@@ -72,6 +78,7 @@ export function loadConfig(): Config {
     stateDir: process.env.STATE_DIR ?? join(process.cwd(), ".state"),
     tailIntervalMs: parseInt(process.env.TAIL_INTERVAL_MS ?? "500", 10),
     busyWindowMs: parseInt(process.env.BUSY_WINDOW_MS ?? "120000", 10),
+    resumeCommand: process.env.RESUME_COMMAND ?? "/gsd auto",
   };
 }
 
