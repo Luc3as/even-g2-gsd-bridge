@@ -65,24 +65,34 @@ test("isStatusCommand rejects prompts that merely contain a keyword", () => {
   assert.equal(isStatusCommand(""), false);
 });
 
-// ─── S04 T01: a pending picker outranks the paused/quiet auto state ──────────
-// The core S04 claim: the blocked-pick chain composes with an auto-pause "for
-// free". The Even App arms its native question card off the "awaiting" value it
-// reads on the /api/sessions + /status poll (MEM006), so a picker armed while the
-// auto-run is live-but-quiet/paused must STILL make getSessionStatus report
-// "awaiting" — the pending-picker branch (provider.ts:97) short-circuits ahead of
-// the liveness branch (108-109) that would otherwise report the quiet run as
-// "busy". Already true in code; this locks it under a paused fixture so no future
-// drift can bury the card behind the auto-run's working state.
+// ─── S05 T01: the input gate opens on a paused/stopped auto-run ──────────────
+// statusFor governs the Even App's INPUT GATE: the App forwards a spoken
+// utterance to POST /api/prompt only when the polled status reads "idle"; while
+// it reads "busy" the word is intercepted as the native "stop waiting?" prompt
+// whose confirm SIGINTs the pane (MEM016). So for the wearer to say/type the
+// resume command into a paused/stopped run, statusFor must resolve the honest
+// DisplayState (classifyDisplayState(readAutoState, hasBlocker)) and return
+// "idle" for disp ∈ {paused, stopped} — WITHOUT idling a genuinely-working
+// quiet-running unit (that would drop the M001 "working" dot and invite a stray
+// resume mid-work). The pending-picker short-circuit stays FIRST (S04 green).
 
-// A live-but-quiet/paused auto-run project: real cwd with .gsd (auto.lock for
-// unit labels + gsd.db workers row for liveness), a session store whose transcript
-// names that cwd so findProject resolves the slug, and a STATE.md blocker so the
-// run is intentionally paused (the S04 "auto-pause" the picker must outrank). The
-// workers row is ACTIVE with a live pid but a heartbeat stale past the 60s TTL —
-// GSD stamps the beat once per unit, so an alive worker with a stale beat is
-// "quiet" (readAutoLiveness), which statusFor maps to "busy" absent a picker.
-function pausedQuietFixture(prefix: string) {
+// One parametrized auto-run project fixture: real cwd with .gsd (auto.lock for
+// unit labels + gsd.db workers row for liveness) and a session store whose
+// transcript names that cwd so findProject resolves the slug.
+//   blocker — write a live STATE.md "## Blockers" entry (the disk pause signal
+//             classifyDisplayState reads via hasBlocker). false → no STATE.md,
+//             so hasBlocker is false and the run is not paused.
+//   worker  — the gsd.db workers row shape:
+//             "quiet"   active row, live pid, beat stale 90s (past the 60s TTL,
+//                       under the 15m stall ceiling) → readAutoLiveness "quiet".
+//             "running" active row, live pid, fresh beat → "running".
+//             "stopped" active row, beat stale 90s, DEAD pid → "stopped" (the
+//                       credit-death case: the persistent TUI pid outlives the
+//                       worker, but a stale-beat + dead-pid row is hard-dead).
+function autoFixture(
+  prefix: string,
+  opts: { blocker: boolean; worker: "quiet" | "running" | "stopped" },
+) {
   const root = mkdtempSync(join(tmpdir(), prefix));
   const cwd = join(root, "proj");
   mkdirSync(join(cwd, ".gsd"), { recursive: true });
@@ -101,17 +111,25 @@ function pausedQuietFixture(prefix: string) {
     join(cwd, ".gsd", "auto.lock"),
     JSON.stringify({ pid: process.pid, unitType: "execute-task", unitId: "M013/S04" }),
   );
-  // Intentional halt: a live STATE.md blocker — the "auto-pause" state.
-  writeFileSync(join(cwd, ".gsd", "STATE.md"), "# GSD State\n\n## Blockers\n- Waiting on the wearer's pick\n");
-  // A quiet worker: active row, live pid, heartbeat stale past the 60s TTL (but
-  // well under the 15m stall ceiling) → readAutoLiveness returns "quiet".
+  if (opts.blocker) {
+    // Intentional halt: a live STATE.md blocker → hasBlocker true → paused.
+    writeFileSync(join(cwd, ".gsd", "STATE.md"), "# GSD State\n\n## Blockers\n- Waiting on the wearer's pick\n");
+  }
+  // A dead pid for the "stopped" shape: max 32-bit pid, never a live process
+  // → pidAlive false → stale-beat + dead-pid row is hard "stopped".
+  const deadPid = 2147483646;
   const realCwd = realpathSync(cwd);
   const db = new DatabaseSync(join(cwd, ".gsd", "gsd.db"));
   try {
     db.exec("CREATE TABLE workers (project_root_realpath TEXT, status TEXT, pid INTEGER, last_heartbeat_at TEXT);");
+    const beat =
+      opts.worker === "running"
+        ? new Date().toISOString() // fresh beat within the 60s TTL
+        : new Date(Date.now() - 90_000).toISOString(); // stale past the 60s TTL
+    const pid = opts.worker === "stopped" ? deadPid : process.pid;
     db.prepare(
       "INSERT INTO workers (project_root_realpath, status, pid, last_heartbeat_at) VALUES (?, ?, ?, ?)",
-    ).run(realCwd, "active", process.pid, new Date(Date.now() - 90_000).toISOString());
+    ).run(realCwd, "active", pid, beat);
   } finally {
     db.close();
   }
@@ -119,14 +137,15 @@ function pausedQuietFixture(prefix: string) {
   return { root, cwd, slug, cfg };
 }
 
-test("getSessionStatus returns 'awaiting' for a pending picker even on a paused/quiet auto-run", async () => {
-  const { root, slug, cfg } = pausedQuietFixture("prov-await-");
+test("getSessionStatus returns 'awaiting' for a pending picker even on a paused auto-run (S04)", async () => {
+  const { root, slug, cfg } = autoFixture("prov-await-", { blocker: true, worker: "quiet" });
   const provider = createGsdProvider(cfg);
   try {
-    // Baseline: no picker pending. The quiet/paused auto-run is a live worker, so
-    // the poll reports "busy" — proving the fixture is NOT already awaiting/idle
-    // and that the picker below is the sole lever that flips it.
-    assert.equal(await provider.getSessionStatus(slug), "busy", "a quiet paused auto-run polls busy without a picker");
+    // Baseline: no picker pending. The run is paused (live STATE.md blocker), so
+    // under the S05 input-gate semantics the poll reports "idle" — the gate is
+    // open for a resume utterance. This proves the picker below is what flips it
+    // to "awaiting", not that the fixture was already awaiting.
+    assert.equal(await provider.getSessionStatus(slug), "idle", "a paused auto-run polls idle (input gate open) without a picker");
 
     // A real picker is armed (parsePicker → setPending) while the run is paused.
     setPending(slug, {
@@ -136,20 +155,48 @@ test("getSessionStatus returns 'awaiting' for a pending picker even on a paused/
       multi: false,
       signature: "s|Fruit|Pick a fruit|Apple|Pear",
     });
-    // The pending-picker branch outranks the quiet-liveness branch → "awaiting",
-    // the value the Even App keys its native question card off (MEM006).
+    // The pending-picker branch stays FIRST and outranks the liveness branch →
+    // "awaiting", the value the Even App keys its native question card off
+    // (MEM006). This is the S04 claim and it must stay green under S05.
     assert.equal(
       await provider.getSessionStatus(slug),
       "awaiting",
-      "a pending picker must outrank the paused/quiet auto state on the status poll",
+      "a pending picker must outrank the paused auto state on the status poll",
     );
 
     // Clearing the picker (answered/exited) hands the poll back to the auto-run's
-    // own state — back to busy, not stuck "awaiting".
+    // own state — back to the paused "idle", not stuck "awaiting".
     clearPending(slug);
-    assert.equal(await provider.getSessionStatus(slug), "busy", "clearing the picker returns the poll to the auto-run state");
+    assert.equal(await provider.getSessionStatus(slug), "idle", "clearing the picker returns the poll to the paused auto-run state");
   } finally {
     clearPending(slug);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("getSessionStatus returns 'idle' for a stopped auto-run (input gate open)", async () => {
+  const { root, slug, cfg } = autoFixture("prov-stopped-", { blocker: false, worker: "stopped" });
+  const provider = createGsdProvider(cfg);
+  try {
+    // A hard-dead worker (stale beat + dead pid) classifies as "stopped"; the gate
+    // opens so the wearer can say the resume command into the crashed run.
+    assert.equal(await provider.getSessionStatus(slug), "idle", "a stopped auto-run polls idle so the resume utterance is accepted");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("getSessionStatus keeps 'busy' for a genuinely-working quiet-running unit (no blocker)", async () => {
+  const { root, slug, cfg } = autoFixture("prov-busy-", { blocker: false, worker: "quiet" });
+  const provider = createGsdProvider(cfg);
+  try {
+    // Regression guard: a quiet run with NO blocker, under the stall ceiling, is a
+    // live worker mid-unit → "running" → "busy". The M001 "working" dot must be
+    // preserved and the input gate stays SHUT so a stray word can't resume/inject
+    // mid-work. The gate release is scoped to disp ∈ {paused, stopped}, not raw
+    // quiet.
+    assert.equal(await provider.getSessionStatus(slug), "busy", "a working quiet-running unit stays busy (gate shut mid-work)");
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

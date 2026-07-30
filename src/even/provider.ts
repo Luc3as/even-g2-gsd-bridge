@@ -9,7 +9,7 @@ import * as tmux from "../gsd/tmux.js";
 import { getPending, clearPending, markAnswered, matchAnswer, matchMulti, renderMenu, getLastMenu, clearLastMenu } from "../gsd/questions.js";
 import { emit, emitText, recordEcho } from "../server/events.js";
 import { buildStatusCard } from "../gsd/status.js";
-import { readAutoState } from "../gsd/auto.js";
+import { readAutoState, classifyDisplayState, hasBlocker } from "../gsd/auto.js";
 import { log } from "../log.js";
 
 const execFileAsync = promisify(execFile);
@@ -95,18 +95,26 @@ export function createGsdProvider(cfg: Config) {
     // an interrupt. Returning "idle" here told the App the turn was done, so
     // every answer became a "quit waiting?" interrupt — the observed lockup.
     if (getPending(p.sessionId)) return "awaiting";
-    // A dead auto-run leaves a fresh transcript mtime but will never write again;
-    // freshness alone would report "busy" for the whole busyWindow, so the /status
-    // route and the list "working" dot lie about a crashed run. The lock death is
-    // authoritative — report idle. Conversely a "quiet" run (stale heartbeat but
-    // the worker pid is alive — the normal state for most of a unit's execution,
-    // since the loop only stamps the beat once per unit) IS working even when the
-    // transcript is silent past the busyWindow — report busy, else the list dot
-    // reads "gsd stopped" while auto grinds a long task. Mirrors the tailer's
-    // liveness gate (watch.ts).
-    const autoLiveness = readAutoState(p.cwd).liveness;
-    if (autoLiveness === "stopped") return "idle";
-    if (autoLiveness === "quiet") return "busy";
+    // Resolve the honest wearer-facing DisplayState from the one liveness
+    // authority (classifyDisplayState — the same classifier the alarm path
+    // trusts), not a raw-liveness branch. This governs the Even App's INPUT
+    // GATE: the App forwards a spoken utterance to POST /api/prompt only when the
+    // status reads "idle"; while it reads "busy" a spoken word is intercepted as
+    // the native "stop waiting for agent response?" prompt whose confirm SIGINTs
+    // the pane (MEM016). So a paused (blocker/pause/cap signal, worker present)
+    // OR stopped (dead, or quiet PAST the stall ceiling — the credit-death case)
+    // run must read "idle" so the wearer's resume utterance actually reaches the
+    // pane. This is input-arming semantics — identical intent to the picker →
+    // "awaiting" release above — NOT a claim the run finished; the visible
+    // ▶RUN/⚠STOP dashboard tag is built separately (buildStatusCard), so idle
+    // here never leaks a false "finished" into the line-1 liveness label (R002).
+    // A genuinely-working quiet-RUNNING unit (no blocker, under STALL_CEILING_MS)
+    // classifies as "running" → "busy": the M001 "working" dot is preserved and a
+    // stray word can't resume/inject mid-work. disp="idle" means not in auto-mode
+    // at all — fall through to the transcript-derived status below.
+    const disp = classifyDisplayState(readAutoState(p.cwd), hasBlocker(p.cwd));
+    if (disp === "paused" || disp === "stopped") return "idle";
+    if (disp === "running") return "busy";
     if (!p.newestJsonl) return "idle";
     try {
       const raw = readFileSync(p.newestJsonl, "utf8");
