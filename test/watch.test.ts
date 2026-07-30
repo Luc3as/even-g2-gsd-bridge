@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync, realpathSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -278,6 +278,130 @@ test("tick's AUTO-STOPPED alarm carries the DB failed-dispatch reason and fires 
       `alarm must carry the DB failed-dispatch reason, got: ${text}`,
     );
     assert.ok(text.includes(" — "), `reason must be em-dash separated from the tag, got: ${text}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// S03 T02 (no-reason degrade): when NO channel has a reason — no DB failed row
+// (here: no gsd.db at all) AND no serious notification — the stopReason resolver
+// yields null and the loud AUTO-STOPPED frame must stand as the ⚠ tag+unit ALONE,
+// with NO dangling em-dash (R010: omit, never invent). This is the push-path
+// analog of S02's status-card "stopped with no recorded reason → line-1 tag alone".
+test("tick's AUTO-STOPPED alarm degrades to the tag+unit alone when no channel has a reason", () => {
+  const root = mkdtempSync(join(tmpdir(), "watch-noreason-"));
+  try {
+    const cwd = join(root, "silentdead");
+    mkdirSync(join(cwd, ".gsd"), { recursive: true });
+    const store = join(root, "store");
+    const dir = join(store, "--nrslug--");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "x.jsonl");
+    writeFileSync(file, SESSION(cwd) + "\n" + ASSISTANT("mid-run answer") + "\n");
+    const cfg = { sessionsDirs: [store], projectRoots: [root], busyWindowMs: 120000, tailIntervalMs: 500 } as Config;
+    // Deliberately NO gsd.db → readStopReason returns null (db missing), and NO
+    // notifications.jsonl → latestSeriousNotification returns null. Liveness falls
+    // back to the lock pid (no db → no workers verdict), so a dead pid is the
+    // hard-dead "stopped" channel with nothing to report.
+
+    let now = Date.now();
+    // Live lock (this pid) → running baseline, no alarm.
+    writeFileSync(join(cwd, ".gsd", "auto.lock"), JSON.stringify({ pid: process.pid, unitType: "execute-task", unitId: "M013/S02" }));
+    tick(cfg, now); // first sight → adopt "running" baseline silently
+    now += 500;
+
+    // The run dies (dead lock pid): running→stopped edge fires once.
+    writeFileSync(join(cwd, ".gsd", "auto.lock"), JSON.stringify({ pid: 2147483647, unitType: "execute-task", unitId: "M013/S02" }));
+    tick(cfg, now);
+    now += 500;
+    tick(cfg, now); // second tick over the same dead state must NOT re-alarm
+
+    const alarms = getMessages("--nrslug--", 0).filter(
+      (m) => m.type === "text_delta" && String((m as { text?: string }).text).includes("AUTO-STOPPED"),
+    );
+    assert.equal(alarms.length, 1, "AUTO-STOPPED must fire exactly once on the death transition");
+    const text = String((alarms[0] as { text?: string }).text);
+    // The whole frame is the tag+unit — no reason segment appended at all.
+    assert.equal(text, "⚠ AUTO-STOPPED M013/S02", `no-reason stop must be the tag+unit alone, got: ${text}`);
+    assert.ok(!text.includes(" — "), `no dangling em-dash when no reason resolves, got: ${text}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// S03 T02 (quiet-never-trusts-the-DB channel guard): a quiet (credit-death) stop —
+// the persistent interactive TUI pid stays alive after credits die mid-unit — must
+// NEVER surface a STALE `unit_dispatches` failed row (the exact MEM020/S02 bug the
+// pull card guards against). The quiet channel resolves its reason ONLY from a
+// fresh serious notification, never the DB. Here a stale failed row sits in the DB
+// and there is no notification, so the alarm must show the tag+unit alone — proving
+// the resolver did not read that DB row on the quiet branch.
+test("tick's AUTO-STOPPED alarm on a quiet (credit-death) stop never surfaces a stale DB failed row", () => {
+  const root = mkdtempSync(join(tmpdir(), "watch-quietguard-"));
+  try {
+    const cwd = join(root, "creditdead");
+    mkdirSync(join(cwd, ".gsd"), { recursive: true });
+    const store = join(root, "store");
+    const dir = join(store, "--qgslug--");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "x.jsonl");
+    writeFileSync(file, SESSION(cwd) + "\n" + ASSISTANT("mid-run answer") + "\n");
+    const cfg = { sessionsDirs: [store], projectRoots: [root], busyWindowMs: 120000, tailIntervalMs: 500 } as Config;
+
+    // The `workers` table drives liveness (an active row with a live pid + a
+    // heartbeat aged past STALL_CEILING_MS → "quiet past the ceiling" → stopped,
+    // the credit-death channel). A STALE failed dispatch from an EARLIER attempt
+    // sits in the DB — the quiet channel must not trust it. GSD keys workers by the
+    // resolved realpath, so match that.
+    const realCwd = realpathSync(cwd);
+    const seed = new DatabaseSync(join(cwd, ".gsd", "gsd.db"));
+    try {
+      seed.exec(
+        "CREATE TABLE unit_dispatches (id INTEGER, milestone_id TEXT, status TEXT, started_at TEXT, ended_at TEXT, exit_reason TEXT, error_summary TEXT);" +
+          "CREATE TABLE workers (project_root_realpath TEXT, status TEXT, pid INTEGER, last_heartbeat_at TEXT);",
+      );
+      seed.prepare(
+        "INSERT INTO unit_dispatches (id, milestone_id, status, started_at, ended_at, exit_reason, error_summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run(1, "M013", "failed", "2026-07-29T00:00:00.000Z", "2026-07-29T00:05:00.000Z", "cap_exhausted", "STALE cap from an earlier attempt");
+      // Fresh heartbeat + live pid → "running" baseline on the first tick.
+      seed.prepare(
+        "INSERT INTO workers (project_root_realpath, status, pid, last_heartbeat_at) VALUES (?, ?, ?, ?)",
+      ).run(realCwd, "active", process.pid, new Date().toISOString());
+    } finally {
+      seed.close();
+    }
+
+    let now = Date.now();
+    // Lock pid alive (the persistent TUI) — the credit-death signature: the worker
+    // process lingers even though the auto loop has died.
+    writeFileSync(join(cwd, ".gsd", "auto.lock"), JSON.stringify({ pid: process.pid, unitType: "execute-task", unitId: "M013/S02" }));
+    tick(cfg, now); // fresh heartbeat → running baseline, no alarm
+    now += 500;
+
+    // Credits die: the heartbeat goes stale past the 15m ceiling while the pid
+    // stays alive → quiet-past-ceiling → stopped. running→stopped edge fires once.
+    const stale = new DatabaseSync(join(cwd, ".gsd", "gsd.db"));
+    try {
+      stale.prepare("UPDATE workers SET last_heartbeat_at = ?").run(new Date(Date.now() - 20 * 60_000).toISOString());
+    } finally {
+      stale.close();
+    }
+    tick(cfg, now);
+    now += 500;
+    tick(cfg, now); // second tick over the same quiet-dead state must NOT re-alarm
+
+    const alarms = getMessages("--qgslug--", 0).filter(
+      (m) => m.type === "text_delta" && String((m as { text?: string }).text).includes("AUTO-STOPPED"),
+    );
+    assert.equal(alarms.length, 1, "AUTO-STOPPED must fire exactly once on the quiet-death edge");
+    const text = String((alarms[0] as { text?: string }).text);
+    assert.ok(text.includes("M013/S02"), `alarm carries the unit id, got: ${text}`);
+    assert.ok(
+      !text.includes("STALE cap from an earlier attempt"),
+      `a quiet stop must NOT surface the stale DB failed row, got: ${text}`,
+    );
+    // No notification channel here either → no reason resolves → tag+unit alone.
+    assert.ok(!text.includes(" — "), `no reason channel for this quiet stop → no dangling em-dash, got: ${text}`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
