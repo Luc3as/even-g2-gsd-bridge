@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readMilestoneMetrics } from "../src/gsd/metrics.ts";
+import { readMilestoneMetrics, readStopReason } from "../src/gsd/metrics.ts";
 
 // Fixed reference instant so elapsed math is deterministic (no Date.now flake).
 const NOW = Date.parse("2026-07-28T06:00:00.000Z");
@@ -25,20 +25,41 @@ function snapshot(unitId: string, cost: number, total: number): string {
 
 // Build a minimal .gsd/gsd.db carrying only the two tables readMilestoneMetrics
 // queries, with only the columns it reads (mirrors the live schema subset).
+interface DispatchRow {
+  id: number;
+  milestone_id: string;
+  started_at: string | null;
+  ended_at: string | null;
+  status?: string | null;
+  exit_reason?: string | null;
+  error_summary?: string | null;
+}
+
 function makeDb(spec: {
   snapshots?: { payload: string; type?: string }[];
-  dispatches?: { id: number; milestone_id: string; started_at: string | null; ended_at: string | null }[];
+  dispatches?: DispatchRow[];
 }): { cwd: string; cleanup: () => void } {
   const cwd = mkdtempSync(join(tmpdir(), "metrics-"));
   mkdirSync(join(cwd, ".gsd"));
   const db = new DatabaseSync(join(cwd, ".gsd", "gsd.db"));
   db.exec("CREATE TABLE audit_events (event_id TEXT, type TEXT, payload_json TEXT)");
-  db.exec("CREATE TABLE unit_dispatches (id INTEGER, milestone_id TEXT, started_at TEXT, ended_at TEXT)");
+  db.exec(
+    "CREATE TABLE unit_dispatches (id INTEGER, milestone_id TEXT, started_at TEXT, ended_at TEXT, " +
+      "status TEXT, exit_reason TEXT, error_summary TEXT)",
+  );
   let i = 0;
   for (const s of spec.snapshots ?? [])
     db.prepare("INSERT INTO audit_events VALUES (?,?,?)").run(`e${i++}`, s.type ?? "unit-metrics-snapshot", s.payload);
   for (const d of spec.dispatches ?? [])
-    db.prepare("INSERT INTO unit_dispatches VALUES (?,?,?,?)").run(d.id, d.milestone_id, d.started_at, d.ended_at);
+    db.prepare("INSERT INTO unit_dispatches VALUES (?,?,?,?,?,?,?)").run(
+      d.id,
+      d.milestone_id,
+      d.started_at,
+      d.ended_at,
+      d.status ?? null,
+      d.exit_reason ?? null,
+      d.error_summary ?? null,
+    );
   db.close();
   return { cwd, cleanup: () => rmSync(cwd, { recursive: true, force: true }) };
 }
@@ -225,6 +246,164 @@ test("readMilestoneMetrics live: active elapsed clamps to 0 on a slightly-future
     const m = readMilestoneMetrics(cwd, "M013", { now: NOW, live: true })!;
     assert.equal(m.activeElapsedMs, 0);
     assert.equal(m.elapsedMs, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---- readStopReason ----------------------------------------------------------
+
+test("readStopReason returns null when there is no .gsd/gsd.db", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "stopreason-nodb-"));
+  try {
+    assert.equal(readStopReason(cwd, "M013"), null);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("readStopReason returns null when the file is not a sqlite db", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "stopreason-garbage-"));
+  try {
+    mkdirSync(join(cwd, ".gsd"));
+    writeFileSync(join(cwd, ".gsd", "gsd.db"), "not a database");
+    assert.equal(readStopReason(cwd, "M013"), null);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("readStopReason returns null when the unit_dispatches table is absent (older schema)", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "stopreason-notable-"));
+  try {
+    mkdirSync(join(cwd, ".gsd"));
+    new DatabaseSync(join(cwd, ".gsd", "gsd.db")).close(); // empty db, no tables
+    assert.equal(readStopReason(cwd, "M013"), null);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("readStopReason returns null when there is no failed dispatch", () => {
+  const { cwd, cleanup } = makeDb({
+    dispatches: [
+      { id: 1, milestone_id: "M013", started_at: iso(600_000), ended_at: iso(540_000), status: "completed" },
+      { id: 2, milestone_id: "M013", started_at: iso(240_000), ended_at: null, status: "running" },
+    ],
+  });
+  try {
+    assert.equal(readStopReason(cwd, "M013"), null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("readStopReason returns the newest failed dispatch's reason (id DESC), not the newest row overall", () => {
+  const { cwd, cleanup } = makeDb({
+    dispatches: [
+      {
+        id: 1,
+        milestone_id: "M013",
+        started_at: iso(600_000),
+        ended_at: iso(540_000),
+        status: "failed",
+        exit_reason: "verify-timeout",
+        error_summary: "first failure — superseded",
+      },
+      {
+        id: 2,
+        milestone_id: "M013",
+        started_at: iso(400_000),
+        ended_at: iso(300_000),
+        status: "failed",
+        exit_reason: "token-exhausted",
+        error_summary: "token budget exhausted after 3 retries",
+      },
+      // Newest row overall is an open crashed row with no reason — must be ignored.
+      { id: 3, milestone_id: "M013", started_at: iso(120_000), ended_at: null, status: "running" },
+    ],
+  });
+  try {
+    assert.deepEqual(readStopReason(cwd, "M013"), {
+      exitReason: "token-exhausted",
+      errorSummary: "token budget exhausted after 3 retries",
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("readStopReason surfaces both fields independently (exit_reason present, error_summary blank)", () => {
+  const { cwd, cleanup } = makeDb({
+    dispatches: [
+      {
+        id: 1,
+        milestone_id: "M013",
+        started_at: iso(400_000),
+        ended_at: iso(300_000),
+        status: "failed",
+        exit_reason: "validation-needs-attention",
+        error_summary: "   ", // whitespace-only → coerced to null
+      },
+    ],
+  });
+  try {
+    assert.deepEqual(readStopReason(cwd, "M013"), {
+      exitReason: "validation-needs-attention",
+      errorSummary: null,
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("readStopReason returns null when the failed row has both reason columns blank", () => {
+  const { cwd, cleanup } = makeDb({
+    dispatches: [
+      {
+        id: 1,
+        milestone_id: "M013",
+        started_at: iso(400_000),
+        ended_at: iso(300_000),
+        status: "failed",
+        exit_reason: null,
+        error_summary: "",
+      },
+    ],
+  });
+  try {
+    assert.equal(readStopReason(cwd, "M013"), null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("readStopReason scopes to the milestone and trims surrounding whitespace", () => {
+  const { cwd, cleanup } = makeDb({
+    dispatches: [
+      {
+        id: 1,
+        milestone_id: "M012",
+        started_at: iso(400_000),
+        ended_at: iso(300_000),
+        status: "failed",
+        error_summary: "other milestone's failure",
+      },
+      {
+        id: 2,
+        milestone_id: "M013",
+        started_at: iso(200_000),
+        ended_at: iso(100_000),
+        status: "failed",
+        error_summary: "  verify timed out x3  ",
+      },
+    ],
+  });
+  try {
+    assert.deepEqual(readStopReason(cwd, "M013"), {
+      exitReason: null,
+      errorSummary: "verify timed out x3",
+    });
   } finally {
     cleanup();
   }

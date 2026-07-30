@@ -137,3 +137,62 @@ export function readMilestoneMetrics(
     }
   }
 }
+
+/**
+ * The machine-written stop reason for the newest *failed* dispatch of a
+ * milestone. `error_summary` is the human-readable sentence; `exit_reason` is
+ * the terser enum/code fallback (caller prefers summary, falls back to reason).
+ */
+export interface StopReason {
+  exitReason: string | null;
+  errorSummary: string | null;
+}
+
+/** Trim a db string, coercing empty/whitespace-only/non-string to null so a
+ * blank column never surfaces as a reason (R010: omit, never invent). */
+function nonEmpty(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t === "" ? null : t;
+}
+
+/**
+ * Read the stop reason of the newest `status='failed'` dispatch for one
+ * milestone, or null when the db is missing/unreadable, there is no failed
+ * dispatch, or both reason columns are blank. Same READ-ONLY, never-throws,
+ * `finally close()` contract as `readMilestoneMetrics`.
+ *
+ * Only a `failed` row carries an authoritative reason: open (crashed) rows and
+ * `completed` rows have none, and the newest dispatch overall may be an open
+ * crashed row with a NULL reason — so the query filters to `failed` and takes
+ * the newest of those by id, never `MAX(id)` overall (R010).
+ */
+export function readStopReason(cwd: string, milestoneId: string): StopReason | null {
+  const dbPath = join(cwd, ".gsd", "gsd.db");
+  if (!existsSync(dbPath)) return null;
+
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const row = db
+      .prepare(
+        "SELECT exit_reason, error_summary FROM unit_dispatches " +
+          "WHERE milestone_id = ? AND status = 'failed' ORDER BY id DESC LIMIT 1",
+      )
+      .get(milestoneId) as { exit_reason: unknown; error_summary: unknown } | undefined;
+    if (!row) return null; // no failed dispatch → no reason
+    const exitReason = nonEmpty(row.exit_reason);
+    const errorSummary = nonEmpty(row.error_summary);
+    if (exitReason === null && errorSummary === null) return null; // failed row, but both blank
+    return { exitReason, errorSummary };
+  } catch (err) {
+    log.debug("metrics", `stop-reason read failed for ${cwd}: ${(err as Error).message}`);
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* best effort */
+    }
+  }
+}
