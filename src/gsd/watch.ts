@@ -6,6 +6,8 @@ import { listProjects, type Project } from "./sessions.js";
 import { capturePane } from "./tmux.js";
 import { parsePicker, getPending, setPending, clearPending, renderMenu, setLastMenu, clearLastMenu, wasAnswered, clearAnswered } from "./questions.js";
 import { readAutoState, latestSeriousNotification, classifyDisplayState, hasBlocker, type AutoLiveness, type DisplayState } from "./auto.js";
+import { readProgress, progressSignature } from "./progress.js";
+import { buildStatusCard } from "./status.js";
 import { log } from "../log.js";
 
 /**
@@ -36,6 +38,23 @@ interface AlarmState {
   notifId: string | null;
 }
 const lastAlarm = new Map<string, AlarmState>();
+
+// Ambient dashboard repaint state, mirroring `lastAlarm`. Per session we remember
+// the last pushed change signature (progressSignature+disp — both deliberately
+// exclude the live elapsed ticker and cost drift) and when we last pushed, so an
+// unchanged tick repaints nothing and the min-interval floor bounds stacking on
+// the append-only lens.
+interface AmbientState {
+  sig: string;
+  lastPushAt: number;
+}
+const ambient = new Map<string, AmbientState>();
+
+// Stacking backstop for the append-only lens: even if the change signature
+// legitimately churns (e.g. task after task completing fast), never repaint the
+// ambient dashboard more than ~2×/min. Debounce is on the signature; this floors
+// the cadence so a burst of real advances still yields at most a few cards/unit.
+const AMBIENT_MIN_INTERVAL_MS = 30_000;
 
 function readFrom(path: string, offset: number): { data: string; newOffset: number } {
   const st = statSync(path);
@@ -197,7 +216,49 @@ export function tick(cfg: Config, now: number): void {
     // becomes visible. Runs for EVERY project, client attached or not: a crash
     // while the glasses are dark must still hit the ring so a reconnect surfaces
     // it (emit no-ops the live broadcast but always fills the ring).
-    const { liveness: autoLiveness, disp } = detectAutoAlarm(p);
+    const { liveness: autoLiveness, disp, alarmed } = detectAutoAlarm(p);
+
+    // Ambient dashboard repaint (S01): during an AUTO run only (the inverse of
+    // the firehose gate below — interactive turns stream their transcript, auto
+    // runs get this glance frame; the two never both emit text_delta on one
+    // session), repaint buildStatusCard on its own when — and only when — the
+    // progress signature OR the display state moves. Debounced on
+    // progressSignature+disp (both exclude the live elapsed ticker and cost
+    // drift, so an unchanged tick repaints nothing) plus a min-interval floor,
+    // and gated on an attached client so the append-only lens never accrues a
+    // burst of stacked cards while dark. Suppressed on a tick where
+    // detectAutoAlarm already pushed a frame (`alarmed`) so the loud one-liner
+    // is not shadowed by a stacked full frame. The stored signature advances
+    // even when we don't push (dark, throttled, or alarm-suppressed), so a later
+    // attach+change pushes exactly once, not a replayed burst. Baseline is
+    // adopted silently on first sight (mirrors detectAutoAlarm's `!prev`) so a
+    // bridge restart doesn't repaint every auto project on tick 1. Defensively
+    // wrapped (R009) so an ambient throw can't break the alarm/status/tail path.
+    if (autoLiveness !== "none") {
+      try {
+        const prog = readProgress(p.cwd);
+        const sig = `${prog ? progressSignature(prog) : "-"}|${disp}`;
+        const prevAmbient = ambient.get(p.sessionId);
+        if (!prevAmbient) {
+          ambient.set(p.sessionId, { sig, lastPushAt: 0 });
+        } else if (sig !== prevAmbient.sig) {
+          const canPush =
+            !alarmed &&
+            sessionHasClients(p.sessionId) &&
+            now - prevAmbient.lastPushAt >= AMBIENT_MIN_INTERVAL_MS;
+          if (canPush) {
+            emitText(p.sessionId, buildStatusCard(p.cwd, p.name));
+            ambient.set(p.sessionId, { sig, lastPushAt: now });
+          } else {
+            // Track the advance without pushing; keep lastPushAt so the
+            // min-interval floor still applies to the eventual push.
+            ambient.set(p.sessionId, { sig, lastPushAt: prevAmbient.lastPushAt });
+          }
+        }
+      } catch (err) {
+        log.error("watch", `ambient repaint failed ${p.sessionId}`, err);
+      }
+    }
 
     // Tail EVERY project, even with no SSE client attached, so the message ring
     // keeps a rolling backlog. Otherwise any jsonl written while the glasses are
@@ -315,7 +376,7 @@ export function tick(cfg: Config, now: number): void {
  * The idle/busy status frame that gates the glasses' input is emitted by the
  * tailer's status resolution off the returned `disp` — one authority for it.
  */
-function detectAutoAlarm(p: Project): { liveness: AutoLiveness; disp: DisplayState } {
+function detectAutoAlarm(p: Project): { liveness: AutoLiveness; disp: DisplayState; alarmed: boolean } {
   const auto = readAutoState(p.cwd);
   const notif = latestSeriousNotification(p.cwd);
   // Pause is a LEVEL signal from current-state STATE.md (a blocker), not the
@@ -328,7 +389,7 @@ function detectAutoAlarm(p: Project): { liveness: AutoLiveness; disp: DisplaySta
   // transitions observed live from here on alarm.
   if (!prev) {
     lastAlarm.set(p.sessionId, { disp, notifId: notif?.id ?? null });
-    return { liveness: auto.liveness, disp };
+    return { liveness: auto.liveness, disp, alarmed: false };
   }
 
   let alarmed = false;
@@ -355,10 +416,11 @@ function detectAutoAlarm(p: Project): { liveness: AutoLiveness; disp: DisplaySta
     emitText(p.sessionId, `${tag}: ${clip(notif.message, 72)}`);
     log.warn("watch", `notif alarm → ${p.sessionId} (${notif.severity} ${notif.id})`);
     notifId = notif.id;
+    alarmed = true; // a frame was pushed this tick → suppress the ambient repaint below
   }
 
   lastAlarm.set(p.sessionId, { disp, notifId });
-  return { liveness: auto.liveness, disp };
+  return { liveness: auto.liveness, disp, alarmed };
 }
 
 /** Trim a message to one lens line, collapsing whitespace/newlines. */
