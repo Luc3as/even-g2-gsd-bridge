@@ -17,12 +17,22 @@ interface Opts {
     /** beatAgoMs > 60_000 is a stale heartbeat (TTL is 60s). */
     workers?: { pid: number; beatAgoMs: number }[];
     snapshots?: { unitId: string; cost: number; tokens: number }[];
-    dispatches?: { id: number; milestone_id: string; startedAgoMs: number; endedAgoMs: number | null }[];
+    dispatches?: {
+      id: number;
+      milestone_id: string;
+      startedAgoMs: number;
+      endedAgoMs: number | null;
+      status?: string;
+      exit_reason?: string;
+      error_summary?: string;
+    }[];
     /** Skip creating audit_events/unit_dispatches to prove the metrics degrade path. */
     noMetricsTables?: boolean;
   };
   lock?: object;
   state?: string;
+  /** Lines written to .gsd/notifications.jsonl (serialized one per line). */
+  notifications?: { id: string; ts: string; severity: string; message: string; source: string }[];
 }
 
 function makeProject(opts: Opts): { cwd: string; cleanup: () => void } {
@@ -36,7 +46,10 @@ function makeProject(opts: Opts): { cwd: string; cleanup: () => void } {
     db.exec("CREATE TABLE workers (pid INTEGER, last_heartbeat_at TEXT, status TEXT, project_root_realpath TEXT)");
     if (!opts.db.noMetricsTables) {
       db.exec("CREATE TABLE audit_events (type TEXT, payload_json TEXT)");
-      db.exec("CREATE TABLE unit_dispatches (id INTEGER, milestone_id TEXT, started_at TEXT, ended_at TEXT)");
+      db.exec(
+        "CREATE TABLE unit_dispatches (id INTEGER, milestone_id TEXT, started_at TEXT, ended_at TEXT, " +
+          "status TEXT, exit_reason TEXT, error_summary TEXT)",
+      );
     }
     for (const m of opts.db.milestones)
       db.prepare("INSERT INTO milestones VALUES (?,?)").run(m.id, m.status);
@@ -52,13 +65,19 @@ function makeProject(opts: Opts): { cwd: string; cleanup: () => void } {
         JSON.stringify({ unitId: s.unitId, cost: s.cost, tokens: { total: s.tokens } }),
       );
     for (const d of opts.db.dispatches ?? [])
-      db.prepare("INSERT INTO unit_dispatches VALUES (?,?,?,?)").run(
+      db.prepare("INSERT INTO unit_dispatches VALUES (?,?,?,?,?,?,?)").run(
         d.id, d.milestone_id, iso(d.startedAgoMs), d.endedAgoMs === null ? null : iso(d.endedAgoMs),
+        d.status ?? null, d.exit_reason ?? null, d.error_summary ?? null,
       );
     db.close();
   }
   if (opts.lock) writeFileSync(join(cwd, ".gsd", "auto.lock"), JSON.stringify(opts.lock));
   if (opts.state) writeFileSync(join(cwd, ".gsd", "STATE.md"), opts.state);
+  if (opts.notifications)
+    writeFileSync(
+      join(cwd, ".gsd", "notifications.jsonl"),
+      opts.notifications.map((n) => JSON.stringify(n)).join("\n") + "\n",
+    );
   return { cwd, cleanup: () => rmSync(cwd, { recursive: true, force: true }) };
 }
 
@@ -158,12 +177,14 @@ test("buildStatusCard: quiet PAST the stall ceiling (credit-death) renders ⚠ST
     state: STATE_MD,
   });
   try {
-    const lines = buildStatusCard(cwd, "Proj").split("\n");
+    const card = buildStatusCard(cwd, "Proj");
+    const lines = card.split("\n");
     // The exact IMG_2379/2380 bug: alive pid + long silence must read STOP, not RUN.
     assert.equal(lines[0], "M013 ⚠STOP · 63% · S 2/4 · T 2/4");
-    // Not live → no runaway elapsed suffix, and the open dispatch is excluded from line 6.
-    assert.equal(lines[4], "▶ T03 Tablet search collapse");
-    assert.equal(lines[5], "$2.50 · 1.0M tok · 14m");
+    // Stopped with no recorded reason → no "▶ task" line at all (would imply work
+    // in flight); line-1 tag stands alone. Line 5 collapses to the metrics line.
+    assert.ok(!card.includes("▶ T03"));
+    assert.equal(lines[4], "$2.50 · 1.0M tok · 14m");
   } finally {
     cleanup();
   }
@@ -178,12 +199,83 @@ test("buildStatusCard: stale beat + dead pid renders ⚠STOP and drops the elaps
     state: STATE_MD,
   });
   try {
-    const lines = buildStatusCard(cwd, "Proj").split("\n");
+    const card = buildStatusCard(cwd, "Proj");
+    const lines = card.split("\n");
     assert.equal(lines[0], "M013 ⚠STOP · 63% · S 2/4 · T 2/4");
-    // Not live: the stale open dispatch must NOT produce a week-long counter…
-    assert.equal(lines[4], "▶ T03 Tablet search collapse");
-    // …and is excluded from milestone elapsed too (closed 14m only).
-    assert.equal(lines[5], "$2.50 · 1.0M tok · 14m");
+    // Not live + no recorded reason: no "▶ task" line, and the stale open dispatch
+    // is excluded from milestone elapsed too (closed 14m only).
+    assert.ok(!card.includes("▶ T03"));
+    assert.equal(lines[4], "$2.50 · 1.0M tok · 14m");
+  } finally {
+    cleanup();
+  }
+});
+
+test("buildStatusCard: hard-dead stop surfaces the failed dispatch's DB reason on line 5", () => {
+  const db = midSliceDb();
+  db.workers = [{ pid: DEAD_PID, beatAgoMs: 5 * 60_000 }]; // dead pid → hard-dead stopped
+  db.dispatches!.push({
+    id: 3, milestone_id: "M013", startedAgoMs: 30 * 60_000, endedAgoMs: 25 * 60_000,
+    status: "failed", exit_reason: "token-exhausted",
+    error_summary: "token budget exhausted after 3 retries",
+  });
+  const { cwd, cleanup } = makeProject({
+    db, lock: { pid: DEAD_PID, unitId: "M013/S03/T03" }, state: STATE_MD,
+  });
+  try {
+    const card = buildStatusCard(cwd, "Proj");
+    const lines = card.split("\n");
+    assert.equal(lines[0], "M013 ⚠STOP · 63% · S 2/4 · T 2/4");
+    // error_summary (human sentence) preferred over exit_reason; ⚠ prefix, no ▶ task.
+    assert.equal(lines[4], "⚠ token budget exhausted after 3 retries");
+    assert.ok(!card.includes("▶ T03"));
+  } finally {
+    cleanup();
+  }
+});
+
+test("buildStatusCard: hard-dead with no failed row falls back to the serious notification", () => {
+  const db = midSliceDb(); // no failed dispatch
+  db.workers = [{ pid: DEAD_PID, beatAgoMs: 5 * 60_000 }];
+  const { cwd, cleanup } = makeProject({
+    db, lock: { pid: DEAD_PID, unitId: "M013/S03/T03" }, state: STATE_MD,
+    notifications: [
+      { id: "n1", ts: iso(60_000), severity: "warning", message: "pre-execution checks failed — auto-mode paused", source: "engine" },
+    ],
+  });
+  try {
+    const card = buildStatusCard(cwd, "Proj");
+    const lines = card.split("\n");
+    assert.equal(lines[0], "M013 ⚠STOP · 63% · S 2/4 · T 2/4");
+    assert.equal(lines[4], "⚠ pre-execution checks failed — auto-mode paused");
+    assert.ok(!card.includes("▶ T03"));
+  } finally {
+    cleanup();
+  }
+});
+
+test("buildStatusCard: credit-death stop shows the serious notification, never the stale DB row", () => {
+  const db = midSliceDb();
+  db.workers = [{ pid: process.pid, beatAgoMs: 20 * 60_000 }]; // quiet past 15m ceiling, alive → stopped
+  db.dispatches!.push({
+    id: 3, milestone_id: "M013", startedAgoMs: 90 * 60_000, endedAgoMs: 85 * 60_000,
+    status: "failed", exit_reason: "verify-timeout",
+    error_summary: "STALE failure from an earlier attempt",
+  });
+  const { cwd, cleanup } = makeProject({
+    db, lock: { pid: process.pid, unitId: "M013/S03/T03" }, state: STATE_MD,
+    notifications: [
+      { id: "n1", ts: iso(60_000), severity: "error", message: "auto-mode halted: API credit balance exhausted", source: "engine" },
+    ],
+  });
+  try {
+    const card = buildStatusCard(cwd, "Proj");
+    const lines = card.split("\n");
+    assert.equal(lines[0], "M013 ⚠STOP · 63% · S 2/4 · T 2/4");
+    // quiet/credit-death → notification channel only; the stale failed row is never read.
+    assert.equal(lines[4], "⚠ auto-mode halted: API credit balance exhausted");
+    assert.ok(!card.includes("STALE"));
+    assert.ok(!card.includes("▶ T03"));
   } finally {
     cleanup();
   }

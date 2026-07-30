@@ -1,8 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readProgress, type Progress, type UnitStatus } from "./progress.js";
-import { readMilestoneMetrics } from "./metrics.js";
-import { readAutoState, classifyDisplayState, type DisplayState } from "./auto.js";
+import { readMilestoneMetrics, readStopReason } from "./metrics.js";
+import { readAutoState, classifyDisplayState, latestSeriousNotification, type AutoLiveness, type DisplayState } from "./auto.js";
 
 /**
  * Build the ≤6-line × ≤52-char lens dashboard frame the glasses show when the
@@ -19,9 +19,10 @@ import { readAutoState, classifyDisplayState, type DisplayState } from "./auto.j
  *   ▶ T03 Tablet search collapse · +4m
  *   $2.50 · 1.0M tok · 18m
  *
- * Line 5 precedence: STATE.md blocker > active task (elapsed suffix only while
- * the run is live) > STATE.md Next:. ○IDLE (not in auto-mode) always shows
- * Next: — a "▶ T03" line would falsely imply work in flight.
+ * Line 5 precedence: STATE.md blocker > stop reason (when ⚠STOP) > active task
+ * (elapsed suffix only while the run is live) > STATE.md Next:. Only a `running`
+ * run paints "▶ task"; a stopped/paused run would falsely imply work in flight,
+ * so it shows its stop reason (or, with no recorded reason, the line-1 tag alone).
  */
 
 /**
@@ -129,6 +130,31 @@ function fmtAgo(ms: number): string {
   return `+${Math.floor(m / 60)}h${m % 60}m`;
 }
 
+/**
+ * The truthful stop reason for a ⚠STOP run, sourced from the right channel per
+ * stop sub-type, or null when nothing authoritative is recorded (R010: omit,
+ * never invent — the line-1 tag then stands alone).
+ *
+ *   hard-dead (liveness "stopped") — the newest failed dispatch's DB reason is
+ *     authoritative (error_summary is the human sentence, exit_reason the terser
+ *     fallback); if that row is absent/blank, fall back to a serious notification.
+ *   credit-death / stall (liveness "quiet" past the ceiling) — the process died
+ *     mid-unit without ever writing a failed row, so any failed row on disk is a
+ *     STALE leftover of an earlier attempt: never trust the DB here, only a fresh
+ *     serious notification.
+ *
+ * Each source degrades independently (readStopReason / latestSeriousNotification
+ * both return null on any read error), so one dead source never blanks the card.
+ */
+function stopReason(cwd: string, milestoneId: string, liveness: AutoLiveness): string | null {
+  if (liveness === "stopped") {
+    const sr = readStopReason(cwd, milestoneId);
+    const dbReason = sr?.errorSummary ?? sr?.exitReason ?? null;
+    if (dbReason) return dbReason;
+  }
+  return latestSeriousNotification(cwd)?.message ?? null;
+}
+
 /** `$263` above ten dollars, cents below — small real costs must not round to $0. */
 function fmtCost(usd: number): string {
   return usd >= 10 ? `$${Math.round(usd)}` : `$${usd.toFixed(2)}`;
@@ -209,10 +235,16 @@ function buildFrame(cwd: string, name: string): string {
   const row = taskRow(prog.tasks, prog.activeTaskId);
   if (row) lines.push(rawClip(row, WIDTH));
 
-  // Line 5: blocker > active task > Next:. nb/blocked computed up front.
+  // Line 5: blocker > stop reason > active task > Next:. nb/blocked computed up front.
   if (blocked && nb) {
     lines.push(clip(`⚠ Blocked: ${nb.text}`, WIDTH));
-  } else if (prog.activeTaskId && disp !== "idle") {
+  } else if (disp === "stopped") {
+    // A dead/hung run must never paint a "▶ task" line (that implies work in
+    // flight). Show why it stopped from the right channel, or — with no recorded
+    // reason — nothing, letting the line-1 ⚠STOP tag stand alone (R010).
+    const reason = stopReason(cwd, prog.milestoneId, auto.liveness);
+    if (reason) lines.push(clip(`⚠ ${reason}`, WIDTH));
+  } else if (prog.activeTaskId && disp === "running") {
     // Elapsed suffix only while running — a stale open dispatch from a dead or
     // paused run would otherwise show a runaway counter (R010).
     const suffix = live && metrics?.activeElapsedMs != null ? ` · ${fmtAgo(metrics.activeElapsedMs)}` : "";
