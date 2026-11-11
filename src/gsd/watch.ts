@@ -494,7 +494,24 @@ function statSizeSafe(path: string): number {
 }
 
 export function startWatcher(cfg: Config): () => void {
-  const timer = setInterval(() => tick(cfg, Date.now()), cfg.tailIntervalMs);
+  // Re-armed after each tick completes, so the interval is the GAP between
+  // ticks, not the period: a slow tick (cold page cache after a reboot) can't
+  // make the schedule fire back-to-back and pin a core.
+  let timer: NodeJS.Timeout | null = null;
+  let stopped = false;
+  const arm = () => {
+    timer = setTimeout(() => {
+      const t0 = Date.now();
+      tick(cfg, t0);
+      const ms = Date.now() - t0;
+      if (ms > cfg.tailIntervalMs) log.warn("watch", `slow tick ${ms}ms (interval=${cfg.tailIntervalMs}ms)`);
+      if (!stopped) arm();
+    }, cfg.tailIntervalMs);
+  };
+  arm();
   log.info("watch", `tailer started (interval=${cfg.tailIntervalMs}ms)`);
-  return () => clearInterval(timer);
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
 }

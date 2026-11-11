@@ -2,6 +2,7 @@ import { readdirSync, statSync, existsSync, openSync, readSync, closeSync } from
 import { join, basename } from "node:path";
 import { parseLine } from "./jsonl.js";
 import { readProgress, formatProgress } from "./progress.js";
+import { memoByStat } from "./statcache.js";
 
 /**
  * A project the bridge can attach to: one gsd sessions dir → one logical
@@ -112,7 +113,31 @@ function autoProgressSubtitle(cwd: string): string {
   return p ? formatProgress(p) : "";
 }
 
-function newestJsonlIn(dir: string): { path: string; mtimeMs: number } | null {
+// Newest-transcript scan cache per session dir. A full readdir+stat over every
+// jsonl (~4.5k files across the stores) is most of an idle tick, so between full
+// scans only the cached newest file is re-stat'd. The dir's own mtime moves on
+// any create/delete, so a rotated-in file is caught on the very next tick (its
+// first sight starts at EOF, so missing it would drop that turn's answer). An
+// OLDER sibling resumed and appended to (newest flips without a dir mtime move)
+// is caught by the periodic full rescan.
+const FULL_RESCAN_MS = 10_000;
+interface NewestScan {
+  scannedAt: number;
+  dirMtimeMs: number;
+  best: { path: string; mtimeMs: number } | null;
+}
+const newestScans = new Map<string, NewestScan>();
+
+function newestJsonlIn(dir: string, dirMtimeMs: number, now: number): { path: string; mtimeMs: number } | null {
+  const hit = newestScans.get(dir);
+  if (hit && hit.dirMtimeMs === dirMtimeMs && now - hit.scannedAt < FULL_RESCAN_MS) {
+    if (!hit.best) return null;
+    try {
+      return { path: hit.best.path, mtimeMs: statSync(hit.best.path).mtimeMs };
+    } catch {
+      /* vanished without a dir mtime move (overlay fs?) → full scan */
+    }
+  }
   let best: { path: string; mtimeMs: number } | null = null;
   for (const f of readdirSync(dir)) {
     if (!f.endsWith(".jsonl")) continue;
@@ -120,7 +145,13 @@ function newestJsonlIn(dir: string): { path: string; mtimeMs: number } | null {
     const st = statSync(p);
     if (!best || st.mtimeMs > best.mtimeMs) best = { path: p, mtimeMs: st.mtimeMs };
   }
+  newestScans.set(dir, { scannedAt: now, dirMtimeMs, best });
   return best;
+}
+
+/** Test seam: forget every cached newest-transcript scan. */
+export function clearNewestScans(): void {
+  newestScans.clear();
 }
 
 /**
@@ -133,6 +164,7 @@ export function listProjects(sessionsDirs: string[], projectRoots: string[]): Pr
   // auto-mode ~/.gsd/agent/sessions). A project can appear in both; key by cwd
   // and keep whichever transcript is newest so live activity always wins.
   const byCwd = new Map<string, Project>();
+  const now = Date.now();
   for (const sessionsDir of sessionsDirs) {
     if (!existsSync(sessionsDir)) continue;
     for (const slug of readdirSync(sessionsDir)) {
@@ -144,9 +176,15 @@ export function listProjects(sessionsDirs: string[], projectRoots: string[]): Pr
         continue;
       }
       if (!st.isDirectory()) continue;
-      const newest = newestJsonlIn(dir);
+      const newest = newestJsonlIn(dir, st.mtimeMs, now);
       if (!newest) continue;
-      const cwd = readCwd(newest.path);
+      // Head (cwd) + tail (latest prompt) reads are memoized on the transcript's
+      // stat signature: an idle transcript costs one stat per tick, not 144 KiB
+      // of reads + JSON parsing.
+      const { cwd, hint } = memoByStat([newest.path], () => {
+        const c = readCwd(newest.path);
+        return { cwd: c, hint: c ? readTitleHint(newest.path) : "" };
+      });
       if (!cwd) continue;
       // Skip worktree/internal dirs and anything outside the allowed roots.
       if (!projectRoots.some((root) => cwd === root || cwd.startsWith(root + "/"))) continue;
@@ -163,7 +201,7 @@ export function listProjects(sessionsDirs: string[], projectRoots: string[]): Pr
         // A project mid auto-mode milestone shows live GSD progress as its
         // subtitle (that is the most relevant "what's happening" for the wearer);
         // otherwise the latest user prompt. DB read is read-only + best-effort.
-        title: autoProgressSubtitle(cwd) || readTitleHint(newest.path) || basename(cwd),
+        title: autoProgressSubtitle(cwd) || hint || basename(cwd),
       });
     }
   }

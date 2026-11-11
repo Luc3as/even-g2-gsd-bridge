@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../log.js";
+import { memoByStat } from "./statcache.js";
 
 /**
  * READ-ONLY view of a project's GSD auto-mode progress, for surfacing on the
@@ -55,7 +56,12 @@ export interface Progress {
 export function readProgress(cwd: string): Progress | null {
   const dbPath = join(cwd, ".gsd", "gsd.db");
   if (!existsSync(dbPath)) return null;
+  // Memoized on the db + WAL stat signature (gsd runs WAL, so a write lands in
+  // -wal first and the main file's mtime only moves on checkpoint).
+  return memoByStat([dbPath, dbPath + "-wal"], () => queryProgress(cwd, dbPath));
+}
 
+function queryProgress(cwd: string, dbPath: string): Progress | null {
   let db: DatabaseSync | null = null;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
@@ -221,31 +227,42 @@ export function readAutoLiveness(cwd: string, now = Date.now(), alive: (pid: num
     /* keep raw cwd */
   }
 
+  // The row fetch (and a read failure) is memoized on the db + WAL stat
+  // signature; the time/pid verdict below is re-derived every call since it
+  // moves without a db write.
+  const row = memoByStat([dbPath, dbPath + "-wal", root], () => queryWorkerRow(cwd, dbPath, root));
+  if (row === null) return null;
+  if (!row) return { liveness: "stopped", quietForMs: null }; // no live worker (only stopping/crashed, or none)
+  const beat = Date.parse(row.last_heartbeat_at);
+  if (Number.isNaN(beat)) return { liveness: "stopped", quietForMs: null }; // unparseable timestamp → treat as not-live
+  if (now - beat <= HEARTBEAT_TTL_MS) return { liveness: "running", quietForMs: null };
+  // Stale beat: only a dead worker process makes that "stopped"; an alive one
+  // is mid-unit (the loop stamps the beat once per unit). No/invalid pid on the
+  // row → can't verify life → treat as stopped, matching GSD's own janitor.
+  if (typeof row.pid !== "number" || !Number.isInteger(row.pid) || row.pid <= 0 || !alive(row.pid)) {
+    return { liveness: "stopped", quietForMs: null };
+  }
+  const lastSeen = Math.max(beat, newestArtifactMtime(cwd) ?? 0);
+  return { liveness: "quiet", quietForMs: Math.max(0, now - lastSeen) };
+}
+
+type WorkerRow = { last_heartbeat_at: string; pid: number | null };
+
+/** Freshest active workers row for the project root: undefined when there is
+ * none, null when the db can't be read (no workers table on older gsd / a fresh
+ * project, or a read error) so the caller keeps its lock-file verdict. */
+function queryWorkerRow(cwd: string, dbPath: string, root: string): WorkerRow | undefined | null {
   let db: DatabaseSync | null = null;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
-    const row = db
+    return db
       .prepare(
         "SELECT last_heartbeat_at, pid FROM workers " +
           "WHERE project_root_realpath = ? AND status = 'active' " +
           "ORDER BY last_heartbeat_at DESC LIMIT 1",
       )
-      .get(root) as { last_heartbeat_at: string; pid: number | null } | undefined;
-    if (!row) return { liveness: "stopped", quietForMs: null }; // no live worker (only stopping/crashed, or none)
-    const beat = Date.parse(row.last_heartbeat_at);
-    if (Number.isNaN(beat)) return { liveness: "stopped", quietForMs: null }; // unparseable timestamp → treat as not-live
-    if (now - beat <= HEARTBEAT_TTL_MS) return { liveness: "running", quietForMs: null };
-    // Stale beat: only a dead worker process makes that "stopped"; an alive one
-    // is mid-unit (the loop stamps the beat once per unit). No/invalid pid on the
-    // row → can't verify life → treat as stopped, matching GSD's own janitor.
-    if (typeof row.pid !== "number" || !Number.isInteger(row.pid) || row.pid <= 0 || !alive(row.pid)) {
-      return { liveness: "stopped", quietForMs: null };
-    }
-    const lastSeen = Math.max(beat, newestArtifactMtime(cwd) ?? 0);
-    return { liveness: "quiet", quietForMs: Math.max(0, now - lastSeen) };
+      .get(root) as WorkerRow | undefined;
   } catch (err) {
-    // No workers table (older gsd / fresh project) throws here — degrade to null
-    // so the caller keeps its lock-file verdict rather than forcing "stopped".
     log.debug("progress", `liveness read failed for ${cwd}: ${(err as Error).message}`);
     return null;
   } finally {

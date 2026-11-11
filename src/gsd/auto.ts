@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } fro
 import { join } from "node:path";
 import { readAutoLiveness, pidAlive } from "./progress.js";
 import { log } from "../log.js";
+import { memoByStat } from "./statcache.js";
 
 /**
  * READ-ONLY view of a project's GSD auto-mode liveness and failure channel, for
@@ -93,8 +94,12 @@ export function classifyDisplayState(
  * missing/unreadable STATE.md → false.
  */
 export function hasBlocker(cwd: string): boolean {
+  const path = join(cwd, ".gsd", "STATE.md");
+  return memoByStat([path], () => parseBlocker(path));
+}
+
+function parseBlocker(path: string): boolean {
   try {
-    const path = join(cwd, ".gsd", "STATE.md");
     if (!existsSync(path)) return false;
     const state = readFileSync(path, "utf8");
     const m = /^##\s+Blockers\s*$/im.exec(state);
@@ -154,7 +159,7 @@ export function readAutoState(cwd: string): AutoState {
   }
   let lock: LockShape;
   try {
-    lock = JSON.parse(readFileSync(lockPath, "utf8")) as LockShape;
+    lock = memoByStat([lockPath], () => JSON.parse(readFileSync(lockPath, "utf8")) as LockShape);
   } catch (err) {
     // A half-written lock (gsd writes atomically via a .tmp rename, so this is
     // rare) is not a liveness signal — treat as no decisive state.
@@ -222,6 +227,10 @@ function tailLines(path: string, maxBytes = 65536): string[] {
 export function latestSeriousNotification(cwd: string): Notification | null {
   const path = join(cwd, ".gsd", "notifications.jsonl");
   if (!existsSync(path)) return null;
+  return memoByStat([path], () => scanSeriousNotification(path));
+}
+
+function scanSeriousNotification(path: string): Notification | null {
   const lines = tailLines(path);
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!.trim();
